@@ -18,7 +18,7 @@ VyapaarCart models the core workflow of a local marketplace such as OLX: a selle
 | Product media | Multiple images per product, persisted display order and metadata, seller upload/reorder/removal controls, and a public thumbnail gallery. Failed file deletion retains cleanup metadata for retry. [Implementation and verification](docs/product-media.md) |
 | Seller catalog | Approved sellers and assigned staff can manage public stores, categorized products, searchable attributes, and variants with unique SKUs and prices |
 | Product search | Public `/products` catalog with indexed title/description relevance, category and seller filters, SQL attribute filtering and bounded pagination. [Design and tests](docs/product-search.md) |
-| Warehouses | Seller-only warehouse management and separate per-SKU/location stock, with version-checked updates. Checkout reservations are not implemented by this milestone. [Design and tests](docs/warehouses.md) |
+| Warehouses | Seller-only warehouse management, separate per-SKU/location stock, version-checked updates, and atomic 10-minute checkout reservations. [Design and tests](docs/warehouses.md) |
 | Inventory audit | Authorized stock edits record actor, reason, previous/new quantities and version atomically with stock. Latest 100 changes are visible per warehouse. [Contract and failure tests](docs/warehouses.md#stock-audit-contract-m-21) |
 | Marketplace | Favourites, buyer–seller conversations, seller dashboard, and shareable listing pages with metadata |
 | Orders | Buyer order requests, seller decision flow, order history, and persisted payment/shipping data |
@@ -218,13 +218,45 @@ docker compose exec -T app sh -c 'RUN_RESERVATION_INTEGRATION=1 npx tsx --test t
 node --env-file=.env.local scripts/migrate-inventory-reservations.mjs
 ```
 
+### M‑23: Final-unit oversell prevention
+
+M‑23 proves the exact checkout race in the roadmap: two different buyers try to reserve the final physical unit concurrently, and exactly one succeeds.
+
+```mermaid
+sequenceDiagram
+  participant A as Buyer A
+  participant B as Buyer B
+  participant API as HTTP reservation API
+  participant DB as PostgreSQL
+  A->>API: Reserve final unit
+  B->>API: Reserve final unit
+  API->>DB: reserve_inventory
+  API->>DB: reserve_inventory
+  DB->>DB: Serialize on the same SKU lock
+  DB-->>API: One reservation committed
+  DB-->>API: One insufficient-stock result
+  API-->>A: 200 or 409
+  API-->>B: 409 or 200
+```
+
+- The integration test sends two independent HTTP requests with different authenticated buyer identities and idempotency keys against a SKU with physical quantity `1`.
+- A test-held row lock creates a deterministic race barrier. The test confirms both requests reached PostgreSQL and were waiting on the same SKU before releasing them.
+- It then requires statuses `200` and `409`, exactly one reservation row, exactly one allocated unit, physical stock still equal to `1`, and public availability equal to `0`.
+- Winner replay is idempotent; loser retry remains rejected and cannot create another reservation.
+- Verified locally on 14 October 2026 for five consecutive contention rounds. This is evidence for reservation-stage oversell prevention, not paid-order finalization, Clerk browser UI, or production load capacity.
+
+```bash
+# Local fixtures only; refuses a non-local DATABASE_URL
+docker compose exec -T app sh -c 'RUN_OVERSELL_INTEGRATION=1 npx tsx --test tests/oversell.integration.test.ts'
+```
+
 ## Resume-safe project description
 
 Use this now:
 
 > Built and deployed VyapaarCart, a full-stack local marketplace using Next.js, TypeScript, Neon Postgres, Drizzle, Clerk, S3-compatible storage, and Razorpay test mode. Implemented authenticated listing management, public seller stores, categorized products and SKU variants, ordered product galleries, buyer–seller messaging, payment signature verification, and a persisted simulated shipment-tracking workflow.
 
-Do **not** yet claim Kafka, Redis, FastAPI, paid SKU checkout, real courier integration, webhooks, or measured scale. Expiring SKU stock reservations have local concurrency tests and a verified live buyer hold/expiry flow. Add new claims only after they are genuinely implemented and tested.
+Do **not** yet claim Kafka, Redis, FastAPI, paid SKU checkout, real courier integration, webhooks, or measured scale. Expiring SKU stock reservations have local concurrency tests, exact five-round final-unit oversell proof, and a verified live buyer hold/expiry flow. Add new claims only after they are genuinely implemented and tested.
 
 ## Licence
 
