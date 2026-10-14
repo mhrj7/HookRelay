@@ -159,7 +159,16 @@ export const inventoryReservations = pgTable("inventory_reservations", {
   idempotencyKey: text("idempotency_key").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`clock_timestamp()`),
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
-}, t => [uniqueIndex("inventory_reservations_buyer_id_idempotency_key_key").on(t.buyerId, t.idempotencyKey), index("idx_reservations_variant_expiry").on(t.variantId, t.expiresAt), check("inventory_reservations_quantity_check", sql`${t.quantity} BETWEEN 1 AND 20`), check("inventory_reservations_unit_price_check", sql`${t.unitPrice} > 0`), check("inventory_reservations_check", sql`${t.expiresAt} > ${t.createdAt}`)]);
+  releasedAt: timestamp("released_at", { withTimezone: true }),
+  releaseReason: text("release_reason"),
+}, t => [
+  uniqueIndex("inventory_reservations_buyer_id_idempotency_key_key").on(t.buyerId, t.idempotencyKey),
+  index("idx_reservations_variant_expiry").on(t.variantId, t.expiresAt),
+  check("inventory_reservations_quantity_check", sql`${t.quantity} BETWEEN 1 AND 20`),
+  check("inventory_reservations_unit_price_check", sql`${t.unitPrice} > 0`),
+  check("inventory_reservations_check", sql`${t.expiresAt} > ${t.createdAt}`),
+  check("inventory_reservations_release_check", sql`(${t.releasedAt} IS NULL AND ${t.releaseReason} IS NULL) OR (${t.releasedAt} IS NOT NULL AND ${t.releaseReason} = 'payment_failed')`),
+]);
 
 export const inventoryReservationAllocations = pgTable("inventory_reservation_allocations", {
   reservationId: text("reservation_id").notNull().references(() => inventoryReservations.id, { onDelete: "cascade" }),

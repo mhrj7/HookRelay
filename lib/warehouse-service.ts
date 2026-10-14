@@ -15,7 +15,7 @@ export async function warehouseInventory(actor: Actor, storeId: string, warehous
   if (!warehouse) return null;
   const inventory = await db.select({ variantId: productVariants.id, sku: productVariants.sku, name: productVariants.name, title: products.title,
     quantity: sql<number>`coalesce(${warehouseStock.quantity}, 0)`, version: sql<number>`coalesce(${warehouseStock.version}, 0)`,
-    reserved: sql<number>`coalesce((SELECT sum(a.quantity)::integer FROM inventory_reservation_allocations a JOIN inventory_reservations r ON r.id = a.reservation_id WHERE a.variant_id = ${productVariants.id} AND a.warehouse_id = ${warehouseId} AND r.expires_at > CURRENT_TIMESTAMP), 0)` })
+    reserved: sql<number>`coalesce((SELECT sum(a.quantity)::integer FROM inventory_reservation_allocations a JOIN inventory_reservations r ON r.id = a.reservation_id WHERE a.variant_id = ${productVariants.id} AND a.warehouse_id = ${warehouseId} AND r.expires_at > CURRENT_TIMESTAMP AND r.released_at IS NULL), 0)` })
     .from(productVariants).innerJoin(products, eq(productVariants.productId, products.id))
     .leftJoin(warehouseStock, and(eq(warehouseStock.variantId, productVariants.id), eq(warehouseStock.warehouseId, warehouseId)))
     .where(eq(products.storeId, storeId)).orderBy(asc(productVariants.sku));

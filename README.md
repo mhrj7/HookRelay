@@ -250,13 +250,39 @@ sequenceDiagram
 docker compose exec -T app sh -c 'RUN_OVERSELL_INTEGRATION=1 npx tsx --test tests/oversell.integration.test.ts'
 ```
 
+### M‑24: Release stock after payment failure or expiry
+
+An active reservation now has three server-owned states: `held`, `released`, or `expired`. A buyer-owned payment-failure request atomically marks a live hold as released; availability ignores that hold immediately while retaining its allocation as an audit record. Natural expiry remains based on the PostgreSQL clock and needs no cleanup worker.
+
+```mermaid
+stateDiagram-v2
+  [*] --> Held: reserve_inventory
+  Held --> Released: payment failure
+  Held --> Expired: database deadline passes
+  Released --> Released: duplicate failure retry
+  Expired --> Expired: late failure notification
+```
+
+- Release authorization is owner-only. Another buyer receives `404` and cannot change the hold.
+- The database locks the reservation before the failure transition. Duplicate failure delivery returns the original release timestamp instead of releasing twice.
+- Allocations and physical stock remain unchanged for auditability. Sellable availability is calculated from unexpired, unreleased holds.
+- Local HTTP/SQL evidence on 14 October 2026: reserving 4 of 5 units reduced availability to 1; payment failure restored availability to 5; retry preserved one release timestamp; a separate 5-unit hold expired back to 5 and a late failure notification did not double-release; physical stock remained 5.
+- This milestone proves the reservation failure transition. It does not claim a paid SKU order, Razorpay webhook ingestion, refund processing, or the later cart/checkout state machine.
+
+```bash
+# Local fixtures only; refuses a non-local DATABASE_URL
+docker compose exec -T app sh -c 'RUN_RELEASE_INTEGRATION=1 npx tsx --test tests/reservation-release.integration.test.ts'
+# Apply after 0010_inventory_reservations.sql in a fresh deployed environment
+node --env-file=.env.local scripts/migrate-reservation-release.mjs
+```
+
 ## Resume-safe project description
 
 Use this now:
 
 > Built and deployed VyapaarCart, a full-stack local marketplace using Next.js, TypeScript, Neon Postgres, Drizzle, Clerk, S3-compatible storage, and Razorpay test mode. Implemented authenticated listing management, public seller stores, categorized products and SKU variants, ordered product galleries, buyer–seller messaging, payment signature verification, and a persisted simulated shipment-tracking workflow.
 
-Do **not** yet claim Kafka, Redis, FastAPI, paid SKU checkout, real courier integration, webhooks, or measured scale. Expiring SKU stock reservations have local concurrency tests, exact five-round final-unit oversell proof, and a verified live buyer hold/expiry flow. Add new claims only after they are genuinely implemented and tested.
+Do **not** yet claim Kafka, Redis, FastAPI, paid SKU checkout, real courier integration, webhooks, or measured scale. SKU holds have local concurrency tests, exact five-round final-unit oversell proof, an idempotent payment-failure release transition, and a verified live buyer hold/expiry flow. Add new claims only after they are genuinely implemented and tested.
 
 ## Licence
 

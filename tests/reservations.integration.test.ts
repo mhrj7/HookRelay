@@ -16,6 +16,7 @@ test("checkout holds: concurrency, retry, owner isolation, expiry and stock prot
   const warehouseIds = [crypto.randomUUID(), crypto.randomUUID()];
   try {
     await db.execute(sql.raw(await readFile(new URL("../drizzle/0010_inventory_reservations.sql", import.meta.url), "utf8")));
+    await db.execute(sql.raw(await readFile(new URL("../drizzle/0011_reservation_release.sql", import.meta.url), "utf8")));
     for (let i = 0; i < 4; i++) {
       const [u] = await db.insert(users).values({ clerkId: `${tag}-${i}`, role: i ? "buyer" : "seller", sellerApprovalStatus: "approved" }).returning(); ids.push(u.id);
     }
