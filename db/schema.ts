@@ -196,6 +196,48 @@ export const cartItems = pgTable("cart_items", {
   check("cart_items_quantity_check", sql`${t.quantity} BETWEEN 1 AND 20`),
 ]);
 
+export const commerceOrders = pgTable("commerce_orders", {
+  id: text("id").primaryKey(),
+  buyerId: integer("buyer_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  status: text("status").notNull().default("pending_payment"),
+  currency: text("currency").notNull().default("INR"),
+  total: integer("total").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`clock_timestamp()`),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`clock_timestamp()`),
+}, t => [index("idx_commerce_orders_buyer_created").on(t.buyerId, t.createdAt), check("commerce_orders_total_check", sql`${t.total} > 0`)]);
+
+export const commerceOrderItems = pgTable("commerce_order_items", {
+  orderId: text("order_id").notNull().references(() => commerceOrders.id, { onDelete: "cascade" }),
+  variantId: text("variant_id").notNull().references(() => productVariants.id, { onDelete: "restrict" }),
+  reservationId: text("reservation_id").notNull().references(() => inventoryReservations.id, { onDelete: "restrict" }),
+  storeId: text("store_id").notNull().references(() => stores.id, { onDelete: "restrict" }),
+  sellerId: integer("seller_id").notNull().references(() => users.id, { onDelete: "restrict" }),
+  quantity: integer("quantity").notNull(),
+  unitPrice: integer("unit_price").notNull(),
+  lineTotal: integer("line_total").notNull(),
+}, t => [primaryKey({ columns: [t.orderId, t.variantId] }), uniqueIndex("commerce_order_items_reservation_id_key").on(t.reservationId), check("commerce_order_items_quantity_check", sql`${t.quantity} BETWEEN 1 AND 20`), check("commerce_order_items_price_check", sql`${t.unitPrice} > 0 AND ${t.lineTotal} = ${t.unitPrice} * ${t.quantity}`)]);
+
+export const paymentIntents = pgTable("payment_intents", {
+  id: text("id").primaryKey(),
+  orderId: text("order_id").notNull().references(() => commerceOrders.id, { onDelete: "cascade" }),
+  provider: text("provider").notNull().default("internal_test"),
+  status: text("status").notNull().default("requires_payment_method"),
+  amount: integer("amount").notNull(),
+  currency: text("currency").notNull().default("INR"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`clock_timestamp()`),
+}, t => [uniqueIndex("payment_intents_order_id_key").on(t.orderId), check("payment_intents_amount_check", sql`${t.amount} > 0`)]);
+
+export const outboxEvents = pgTable("outbox_events", {
+  id: text("id").primaryKey(),
+  aggregateType: text("aggregate_type").notNull(),
+  aggregateId: text("aggregate_id").notNull(),
+  eventType: text("event_type").notNull(),
+  payload: text("payload").notNull(),
+  status: text("status").notNull().default("pending"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`clock_timestamp()`),
+  publishedAt: timestamp("published_at", { withTimezone: true }),
+}, t => [index("idx_outbox_events_status_created").on(t.status, t.createdAt), uniqueIndex("outbox_events_aggregate_event_key").on(t.aggregateType, t.aggregateId, t.eventType)]);
+
 export const productVariantAttributes = pgTable("product_variant_attributes", {
   variantId: text("variant_id").notNull().references(() => productVariants.id, { onDelete: "cascade" }),
   key: text("key").notNull(),

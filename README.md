@@ -307,6 +307,43 @@ docker compose exec -T app sh -c 'RUN_CART_INTEGRATION=1 npx tsx --test tests/ca
 node --env-file=.env.local scripts/migrate-buyer-cart.mjs
 ```
 
+### M‑26: Atomic cart checkout
+
+The cart page now reserves every active SKU and submits those buyer-owned holds to one PostgreSQL checkout transaction. That transaction locks the buyer cart and reservations, revalidates current products, sellers, quantities and prices, and either creates every checkout record or creates none.
+
+```mermaid
+sequenceDiagram
+  participant B as Buyer cart
+  participant A as Checkout API
+  participant D as PostgreSQL transaction
+  B->>A: Cart reservation IDs
+  A->>D: create_cart_checkout
+  D->>D: Lock cart + reservations
+  D->>D: Revalidate buyer, active SKUs, quantities, prices, expiry
+  alt every validation passes
+    D->>D: Insert order + immutable order items
+    D->>D: Insert payment intent
+    D->>D: Insert pending order.created outbox event
+    D->>D: Clear cart items
+    D-->>A: Consistent checkout IDs and total
+  else any validation fails
+    D-->>A: Error; no checkout records created
+  end
+```
+
+- Each order item records the exact SKU, reservation, seller, store, quantity, unit price and line total used at checkout. A reservation is unique across order items, preventing reuse.
+- The server creates an `internal_test` payment intent in `requires_payment_method`; the browser cannot supply its ID, amount, currency, order ID or event payload.
+- The transaction writes one pending `order.created` outbox record alongside the order and payment intent. Event publishing is a later milestone; this milestone proves atomic outbox creation only.
+- Local HTTP/SQL evidence on 15 October 2026: an invalid cross-buyer reservation produced zero orders, payment intents and outbox events and left the cart intact. A valid two-SKU cart (2 × ₹125 plus 1 × ₹200) created exactly one ₹450 order, two matching immutable items, one ₹450 payment intent and one pending outbox event, then cleared only that buyer's cart. Reusing a consumed reservation was rejected and all record counts remained one.
+- Scope: no payment was captured, no external provider intent was created, inventory was not deducted, and the outbox event was not published. Those remain separate later milestones.
+
+```bash
+# Local fixtures only; refuses a non-local DATABASE_URL
+docker compose exec -T app sh -c 'RUN_CART_CHECKOUT_INTEGRATION=1 npx tsx --test tests/cart-checkout.integration.test.ts'
+# Apply after reservation and cart migrations
+node --env-file=.env.local scripts/migrate-cart-checkout.mjs
+```
+
 ## Resume-safe project description
 
 Use this now:
