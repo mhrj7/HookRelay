@@ -276,6 +276,37 @@ docker compose exec -T app sh -c 'RUN_RELEASE_INTEGRATION=1 npx tsx --test tests
 node --env-file=.env.local scripts/migrate-reservation-release.mjs
 ```
 
+### M‑25: Persistent buyer cart with current SKU pricing
+
+Buyers can add an active SKU, keep one cart across requests, change its quantity from 1–20, and remove it. The cart belongs to the authenticated buyer—not to a browser tab—and another buyer cannot read or mutate it.
+
+```mermaid
+sequenceDiagram
+  participant B as Signed-in buyer
+  participant A as Cart API
+  participant D as PostgreSQL
+  B->>A: Add SKU and quantity
+  A->>D: Validate current SKU/store/seller state
+  D->>D: Upsert buyer cart and cart item
+  B->>A: Read cart later
+  A->>D: Join saved quantities to current SKU prices
+  D-->>A: Active lines and recalculated total
+  A-->>B: Buyer-owned cart
+```
+
+- `carts.buyer_id` is unique, so each buyer has one durable cart. `(cart_id, variant_id)` is the item key and the database constrains quantities to 1–20.
+- The client never supplies a price. Every cart read joins the saved quantity to the current variant, product, public store and approved seller state. Active lines use the current SKU price; inactive/hidden lines remain visible but contribute zero to the total.
+- Adding an inactive/hidden SKU or the seller's own SKU is rejected. Buyer identities are isolated, and non-buyer roles cannot use the API.
+- Local HTTP/SQL evidence on 15 October 2026: buyer A added 2 units at ₹125 and received ₹250; a fresh request returned the same cart; buyer B received an empty cart; changing the SKU price to ₹150 recalculated buyer A's total to ₹300; quantity 3 recalculated to ₹450; deactivating the product excluded the line; cross-buyer removal, own-store addition and admin access were rejected.
+- Scope: this milestone is the persistent cart only. It does not claim cart-to-reservation conversion, paid orders, tax/shipping calculation, coupons or checkout finalization.
+
+```bash
+# Local fixtures only; refuses a non-local DATABASE_URL
+docker compose exec -T app sh -c 'RUN_CART_INTEGRATION=1 npx tsx --test tests/cart.integration.test.ts'
+# Apply after the catalog tables exist in a deployed environment
+node --env-file=.env.local scripts/migrate-buyer-cart.mjs
+```
+
 ## Resume-safe project description
 
 Use this now:

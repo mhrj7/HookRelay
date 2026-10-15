@@ -177,6 +177,25 @@ export const inventoryReservationAllocations = pgTable("inventory_reservation_al
   quantity: integer("quantity").notNull(),
 }, t => [primaryKey({ columns: [t.reservationId, t.warehouseId] }), foreignKey({ columns: [t.warehouseId, t.variantId], foreignColumns: [warehouseStock.warehouseId, warehouseStock.variantId] }).onDelete("restrict"), index("idx_reservation_allocations_stock").on(t.variantId, t.warehouseId), check("inventory_reservation_allocations_quantity_check", sql`${t.quantity} > 0`)]);
 
+export const carts = pgTable("carts", {
+  id: text("id").primaryKey(),
+  buyerId: integer("buyer_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`clock_timestamp()`),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`clock_timestamp()`),
+}, t => [uniqueIndex("carts_buyer_id_key").on(t.buyerId)]);
+
+export const cartItems = pgTable("cart_items", {
+  cartId: text("cart_id").notNull().references(() => carts.id, { onDelete: "cascade" }),
+  variantId: text("variant_id").notNull().references(() => productVariants.id, { onDelete: "restrict" }),
+  quantity: integer("quantity").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`clock_timestamp()`),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`clock_timestamp()`),
+}, t => [
+  primaryKey({ columns: [t.cartId, t.variantId] }),
+  index("idx_cart_items_variant").on(t.variantId),
+  check("cart_items_quantity_check", sql`${t.quantity} BETWEEN 1 AND 20`),
+]);
+
 export const productVariantAttributes = pgTable("product_variant_attributes", {
   variantId: text("variant_id").notNull().references(() => productVariants.id, { onDelete: "cascade" }),
   key: text("key").notNull(),

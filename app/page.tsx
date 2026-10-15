@@ -433,10 +433,10 @@ export default function Home() {
           </Show>
           <button
             className="cart-button"
-            onClick={() => setShowCart(true)}
-            aria-label="Open cart"
+            onClick={() => window.location.assign("/cart")}
+            aria-label="Open your saved buyer cart"
           >
-            ⌁ <span>{cart.length}</span>
+            ⌁ <span>Cart</span>
           </button>
           <button
             className="sell-button"
