@@ -48,3 +48,7 @@ export function canInviteOrganizationStaff(actor: Actor, organizationOwnerId: nu
 export function canApproveSellers(actor: Actor) {
   return actor.role === "admin";
 }
+
+export function canAccessAdminOperations(actor: Actor) {
+  return actor.role === "admin";
+}

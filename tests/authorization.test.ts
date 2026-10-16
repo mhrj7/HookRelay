@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { canApproveSellers, canBuy, canInviteOrganizationStaff, canManageOwnRecord, canManageSeller, canOperateStore, sellerAccountId, type Actor } from "../lib/authorization";
+import { canAccessAdminOperations, canApproveSellers, canBuy, canInviteOrganizationStaff, canManageOwnRecord, canManageSeller, canOperateStore, sellerAccountId, type Actor } from "../lib/authorization";
 
 const buyer: Actor = { id: 1, clerkId: "buyer", role: "buyer", staffForSellerId: null, sellerApprovalStatus: "not_requested" };
 const seller: Actor = { id: 2, clerkId: "seller", role: "seller", staffForSellerId: null, sellerApprovalStatus: "approved" };
@@ -41,4 +41,6 @@ test("seller approval gates store operation and reserves decisions for administr
   assert.equal(canOperateStore(admin), true);
   assert.equal(canApproveSellers(admin), true);
   assert.equal(canApproveSellers(seller), false);
+  assert.equal(canAccessAdminOperations(admin), true);
+  assert.equal(canAccessAdminOperations(seller), false);
 });
