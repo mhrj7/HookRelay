@@ -24,6 +24,7 @@ VyapaarCart models the core workflow of a local marketplace such as OLX: a selle
 | Orders | Buyer order requests, seller decision flow, order history, and persisted payment/shipping data |
 | Payments | Razorpay test-order creation and server-side HMAC signature verification |
 | Delivery | Seller pickup profile, local deterministic shipment simulator by default, plus a Shiprocket sandbox/production carrier adapter with persisted tracking events and handover state |
+| Notifications | Intended-user in-app updates for order and shipment events; a Resend-compatible email delivery adapter is configurable through server-only variables |
 | Platform | Neon Postgres schema with foreign keys and indexes; deployed on Vercel |
 
 ## Architecture
@@ -38,6 +39,7 @@ flowchart LR
   A --> B[S3-compatible object storage]
   A --> R[Razorpay test API]
   A --> S[Local delivery simulator]
+  A --> N[(Notifications)]
 
   subgraph Vercel
     W
@@ -149,6 +151,9 @@ The application is available at `http://localhost:3000`; the database schema is 
 | `CLERK_SECRET_KEY` | Protected API routes | Server-only Clerk key |
 | `RAZORPAY_TEST_KEY_ID` | Test checkout | Never use a live key in this project |
 | `RAZORPAY_TEST_KEY_SECRET` | Test payment verification | Server-only secret |
+| `NOTIFICATION_EMAIL_PROVIDER` | Email delivery selection | Set to `resend` only when the two variables below are configured |
+| `RESEND_API_KEY` | Resend email API | Server-only API key |
+| `NOTIFICATION_FROM_EMAIL` | Resend sender identity | A verified sender address or domain |
 
 Never commit real credentials. Vercel environment variables are used for the deployed application.
 
@@ -167,10 +172,10 @@ This repository **does not yet claim** to be the complete multi-vendor commerce 
 
 - Carts, multi-SKU checkout, or finalization of SKU reservations into paid orders
 - Disputes, refunds, or commission accounting
-- Redis rate limiting, Kafka/Redpanda, transactional outbox, email notifications, or OpenTelemetry/Prometheus/Grafana
+- Redis rate limiting, Kafka/Redpanda, transactional outbox, or OpenTelemetry/Prometheus/Grafana
 - Webhook endpoints, HMAC-signed webhook deliveries, retry queues, delivery console, secret rotation, replay, or endpoint-level rate limits
 - FastAPI, Alembic, pytest, Playwright, k6, or GitHub Actions CI
-- A real courier integration; delivery is a local simulator for safe testable workflows
+- A live courier booking; a Shiprocket adapter is implemented and the local simulator remains the safe default
 
 ## Roadmap toward the flagship marketplace
 
@@ -484,6 +489,23 @@ flowchart LR
 - Select `shiprocket_sandbox` with `SHIPROCKET_SANDBOX_EMAIL` / `SHIPROCKET_SANDBOX_PASSWORD`, or `shiprocket_production` with the corresponding `SHIPROCKET_PRODUCTION_*` variables. Do not expose these values to the browser or commit them.
 - Contract tests inject a fake transport and independently assert sandbox and production base URLs, credentials, auth, order, AWB, and tracking request shapes. They make no external network request and do not create a carrier booking.
 - Scope: this verifies the production-provider integration contract, not a live carrier booking. Production credentials and a real booking remain opt-in operational actions.
+
+### M‑39: Order notifications
+
+Key marketplace order events produce notifications for the affected account: new order requests, acceptance/cancellation, verified test payments, shipment-label creation, and shipment tracking changes. Each recipient/event/channel combination has one database-enforced delivery key.
+
+```mermaid
+flowchart LR
+  E[Order or shipment event] --> K[Recipient/event/channel unique key]
+  K --> I[In-app notification: delivered]
+  K --> M[Email notification]
+  M --> R[Resend when configured]
+  M --> S[Skipped with a visible delivery status when not configured]
+```
+
+- `GET /api/notifications` returns only in-app records owned by the signed-in user. A user cannot read or mark another user's notification as read.
+- The email adapter posts to Resend with a provider idempotency key. When no verified Resend sender is configured, the email record is explicitly marked `skipped`; it is not falsely reported as delivered.
+- Tests prove that a duplicate order event creates one in-app delivery and sends one email, uses a provider idempotency key, and does not expose an API key in failure text.
 
 ## Resume-safe project description
 

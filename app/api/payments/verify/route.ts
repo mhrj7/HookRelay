@@ -5,6 +5,7 @@ import { requireUser } from "../../../../lib/auth";
 import { actorFor, ensureUser, routeError } from "../../../../lib/marketplace";
 import { canBuy } from "../../../../lib/authorization";
 import { paymentProvider } from "../../../../lib/payment-provider";
+import { dispatchOrderNotification, recipientFor } from "../../../../lib/notification-dispatch";
 
 export const dynamic = "force-dynamic";
 
@@ -24,6 +25,8 @@ export async function POST(request: Request) {
     const verification = await provider.verifyPayment({ providerOrderId: razorpayOrderId, providerPaymentId: razorpayPaymentId, signature: razorpaySignature });
     if (!verification.verified) return Response.json({ error: "Payment signature could not be verified." }, { status: 400 });
     const [updated] = await db.update(orders).set({ paymentStatus: "paid", razorpayPaymentId, updatedAt: new Date().toISOString() }).where(eq(orders.id, order.id)).returning();
+    const seller = await recipientFor(db, order.sellerId);
+    await dispatchOrderNotification(db, { eventKey: `order:${order.id}:payment_paid:seller`, eventType: "order.payment_paid", recipientId: seller.id, recipientClerkId: seller.clerkId, title: "Test payment verified", body: "The buyer’s test payment was verified. You can now create the shipment after delivery details are present." });
     return Response.json({ order: updated });
   } catch (error) {
     return routeError(error);

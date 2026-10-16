@@ -4,6 +4,7 @@ import { listings, orders, sellerPickupProfiles, shipmentEvents, shipments } fro
 import { requireUser } from "../../../lib/auth";
 import { actorFor, ensureUser, routeError } from "../../../lib/marketplace";
 import { canBuy, sellerAccountId } from "../../../lib/authorization";
+import { dispatchOrderNotification, recipientFor } from "../../../lib/notification-dispatch";
 
 export const dynamic = "force-dynamic";
 
@@ -46,6 +47,8 @@ export async function POST(request: Request) {
     if (listing.sellerId === buyer.id) return Response.json({ error: "You cannot request your own listing." }, { status: 400 });
     const order = { id: crypto.randomUUID(), listingId, buyerId: buyer.id, sellerId: listing.sellerId, paymentMethod: paymentMethod === "upi_on_pickup" ? "upi_on_pickup" : "cash_on_pickup", status: "requested", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
     await db.insert(orders).values(order).onConflictDoNothing();
+    const seller = await recipientFor(db, listing.sellerId);
+    await dispatchOrderNotification(db, { eventKey: `order:${order.id}:requested:seller`, eventType: "order.requested", recipientId: seller.id, recipientClerkId: seller.clerkId, title: "New order request", body: `A buyer requested ${listing.title}. Review the request in Orders.` });
     return Response.json({ order }, { status: 201 });
   } catch (error) {
     return routeError(error);

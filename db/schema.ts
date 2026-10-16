@@ -417,6 +417,27 @@ export const shipmentEvents = pgTable("shipment_events", {
   occurredAt: text("occurred_at").notNull().default(now),
 }, (table) => [index("idx_shipment_events_shipment_occurred_at").on(table.shipmentId, table.occurredAt)]);
 
+export const notifications = pgTable("notifications", {
+  id: text("id").primaryKey(),
+  recipientId: integer("recipient_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  eventKey: text("event_key").notNull(),
+  eventType: text("event_type").notNull(),
+  channel: text("channel").notNull(),
+  title: text("title").notNull(),
+  body: text("body").notNull(),
+  status: text("status").notNull().default("pending"),
+  providerMessageId: text("provider_message_id"),
+  failureReason: text("failure_reason"),
+  readAt: text("read_at"),
+  deliveredAt: text("delivered_at"),
+  createdAt: text("created_at").notNull().default(now),
+}, (table) => [
+  uniqueIndex("notifications_recipient_event_channel_key").on(table.recipientId, table.eventKey, table.channel),
+  index("idx_notifications_recipient_created").on(table.recipientId, table.createdAt),
+  check("notifications_channel_check", sql`${table.channel} IN ('in_app', 'email')`),
+  check("notifications_status_check", sql`${table.status} IN ('pending', 'delivered', 'failed', 'skipped')`),
+]);
+
 export const sellerPickupProfiles = pgTable("seller_pickup_profiles", {
   sellerId: integer("seller_id").primaryKey().references(() => users.id, { onDelete: "cascade" }),
   pickupLocation: text("pickup_location").notNull(),

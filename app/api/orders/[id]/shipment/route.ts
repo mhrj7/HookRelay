@@ -12,6 +12,7 @@ import { createShipmentRecord } from "../../../../../lib/shipment-service";
 import { shippingProvider } from "../../../../../lib/shipping-provider";
 import { actorFor, routeError } from "../../../../../lib/marketplace";
 import { canManageSeller, sellerAccountId } from "../../../../../lib/authorization";
+import { dispatchOrderNotification, recipientFor } from "../../../../../lib/notification-dispatch";
 
 export const dynamic = "force-dynamic";
 type Context = { params: Promise<{ id: string }> };
@@ -108,6 +109,8 @@ export async function POST(request: Request, { params }: Context) {
       .update(orders)
       .set({ status: "ready_for_pickup", updatedAt: now })
       .where(eq(orders.id, orderId));
+    const buyer = await recipientFor(db, order.buyerId);
+    await dispatchOrderNotification(db, { eventKey: `order:${orderId}:shipment_created:buyer`, eventType: "order.shipment_created", recipientId: buyer.id, recipientClerkId: buyer.clerkId, title: "Shipment label created", body: `Your shipment is ready for pickup. Tracking number: ${prepared.shipment.trackingNumber}.` });
     return Response.json({ shipment: prepared.shipment }, { status: 201 });
   } catch (error) {
     return routeError(error);

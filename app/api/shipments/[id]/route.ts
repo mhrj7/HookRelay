@@ -6,6 +6,7 @@ import { advanceShipmentRecord } from "../../../../lib/shipment-service";
 import { shippingProvider } from "../../../../lib/shipping-provider";
 import { actorFor, routeError } from "../../../../lib/marketplace";
 import { canManageSeller, sellerAccountId } from "../../../../lib/authorization";
+import { dispatchOrderNotification, recipientFor } from "../../../../lib/notification-dispatch";
 
 export const dynamic = "force-dynamic";
 type Context = { params: Promise<{ id: string }> };
@@ -27,6 +28,8 @@ export async function PATCH(request: Request, { params }: Context) {
     const [shipment] = await db.update(shipments).set({ status: next.shipment.status, updatedAt: now }).where(eq(shipments.id, id)).returning();
     await db.insert(shipmentEvents).values({ id: crypto.randomUUID(), shipmentId: id, ...next.event });
     if (next.shipment.status === "delivered") await db.update(orders).set({ status: "completed", updatedAt: now }).where(eq(orders.id, record.order.id));
+    const buyer = await recipientFor(db, record.order.buyerId);
+    await dispatchOrderNotification(db, { eventKey: `shipment:${id}:${next.shipment.status}:buyer`, eventType: `shipment.${next.shipment.status}`, recipientId: buyer.id, recipientClerkId: buyer.clerkId, title: "Shipment update", body: next.event.message });
     return Response.json({ shipment, next: next.shipment.status });
   } catch (error) {
     return routeError(error);
