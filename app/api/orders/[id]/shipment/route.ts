@@ -94,6 +94,8 @@ export async function POST(request: Request, { params }: Context) {
         state: order.shippingState,
         pincode: order.shippingPincode,
       },
+      pickup: { location: pickup.pickupLocation, name: pickup.contactName, email: pickup.email, phone: pickup.phone, address: pickup.address, city: pickup.city, state: pickup.state, pincode: pickup.pincode },
+      item: { name: record.listing.title, unitPrice: record.listing.price },
       createdAt: now,
     }, shippingProvider());
     await db.insert(shipments).values(prepared.shipment);

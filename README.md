@@ -23,7 +23,7 @@ VyapaarCart models the core workflow of a local marketplace such as OLX: a selle
 | Marketplace | Favourites, buyer–seller conversations, seller dashboard, and shareable listing pages with metadata |
 | Orders | Buyer order requests, seller decision flow, order history, and persisted payment/shipping data |
 | Payments | Razorpay test-order creation and server-side HMAC signature verification |
-| Delivery | Seller pickup profile, local deterministic shipment simulator, tracking events, and handover state |
+| Delivery | Seller pickup profile, local deterministic shipment simulator by default, plus a Shiprocket sandbox/production carrier adapter with persisted tracking events and handover state |
 | Platform | Neon Postgres schema with foreign keys and indexes; deployed on Vercel |
 
 ## Architecture
@@ -465,6 +465,25 @@ flowchart LR
 - Provider output owns carrier name, tracking number, status, ETA, event message and optional carrier identifiers. The route persists those neutral results and updates the order only when the returned tracking state is `delivered`.
 - The M‑33 test injects a mock carrier, verifies a provider-produced label and metadata are persisted into the domain record, advances the same record to `picked_up`, and confirms the completed state produces no additional transition. No route or order-domain code changes for the mock.
 - Scope: the default provider remains the local deterministic simulator. This is an abstraction milestone, not a Shiprocket/Delhivery integration or a real courier-booking claim.
+
+### M‑36: Shiprocket carrier adapter
+
+The shipping contract now has a concrete `ShiprocketShippingProvider`. It uses distinct Shiprocket sandbox and production API bases and is selectable only through server-side configuration; the local simulator remains the default when no provider is selected.
+
+```mermaid
+flowchart LR
+  R[Shipment route] --> C[ShippingProvider contract]
+  C --> L[Local sandbox provider: default]
+  C --> S[Shiprocket sandbox adapter]
+  C --> P[Shiprocket production adapter]
+  S --> SB[api-sandbox.shiprocket.in]
+  P --> PR[apiv2.shiprocket.in]
+```
+
+- The Shiprocket adapter authenticates with environment-specific server-side credentials, creates an ad-hoc order, assigns an AWB, and translates carrier tracking statuses into the marketplace's neutral shipment states.
+- Select `shiprocket_sandbox` with `SHIPROCKET_SANDBOX_EMAIL` / `SHIPROCKET_SANDBOX_PASSWORD`, or `shiprocket_production` with the corresponding `SHIPROCKET_PRODUCTION_*` variables. Do not expose these values to the browser or commit them.
+- Contract tests inject a fake transport and independently assert sandbox and production base URLs, credentials, auth, order, AWB, and tracking request shapes. They make no external network request and do not create a carrier booking.
+- Scope: this verifies the production-provider integration contract, not a live carrier booking. Production credentials and a real booking remain opt-in operational actions.
 
 ## Resume-safe project description
 

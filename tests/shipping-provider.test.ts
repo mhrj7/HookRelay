@@ -31,6 +31,8 @@ test("M-33 order shipment domain uses an injected mock provider without provider
   const created = await createShipmentRecord("order_001", {
     orderId: "order_001",
     recipient: { name: "Buyer", email: "buyer@example.test", phone: "9999999999", address: "1 Test Street", city: "Bengaluru", state: "Karnataka", pincode: "560001" },
+    pickup: { location: "test-pickup", name: "Seller", email: "seller@example.test", phone: "9888888888", address: "2 Seller Street", city: "Bengaluru", state: "Karnataka", pincode: "560001" },
+    item: { name: "Test item", unitPrice: 125 },
     createdAt: "2026-10-16T10:00:00.000Z",
   }, mockProvider);
   assert.equal(created.shipment.provider, "Mock carrier");
