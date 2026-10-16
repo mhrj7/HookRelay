@@ -7,22 +7,24 @@ import { useCallback, useEffect, useState } from "react";
 type Notification = { id: string; title: string; body: string; eventType: string; readAt: string | null; createdAt: string; status: string };
 
 export default function NotificationsPage() {
-  const { isSignedIn, getToken } = useAuth();
+  const { isLoaded, isSignedIn, getToken } = useAuth();
   const [items, setItems] = useState<Notification[]>([]);
   const [notice, setNotice] = useState("");
   const request = useCallback(async (path: string, init: RequestInit = {}) => {
     const token = await getToken();
-    return fetch(path, { ...init, headers: { ...init.headers, Authorization: `Bearer ${token}` } });
+    const headers = new Headers(init.headers);
+    if (token) headers.set("Authorization", `Bearer ${token}`);
+    return fetch(path, { ...init, headers, cache: "no-store" });
   }, [getToken]);
 
   useEffect(() => {
-    if (!isSignedIn) return;
+    if (!isLoaded || !isSignedIn) return;
     void request("/api/notifications").then(async response => {
       const data = await response.json();
       if (response.ok) setItems(data.notifications);
       else setNotice(data.error ?? "Could not load notifications.");
     });
-  }, [isSignedIn, request]);
+  }, [isLoaded, isSignedIn, request]);
 
   async function markRead(id: string) {
     const response = await request(`/api/notifications/${id}`, { method: "PATCH" });
