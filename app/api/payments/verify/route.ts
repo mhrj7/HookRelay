@@ -4,7 +4,7 @@ import { orders } from "../../../../db/schema";
 import { requireUser } from "../../../../lib/auth";
 import { actorFor, ensureUser, routeError } from "../../../../lib/marketplace";
 import { canBuy } from "../../../../lib/authorization";
-import { verifyRazorpaySignature } from "../../../../lib/razorpay-signature";
+import { paymentProvider } from "../../../../lib/payment-provider";
 
 export const dynamic = "force-dynamic";
 
@@ -19,15 +19,10 @@ export async function POST(request: Request) {
     const user = await ensureUser(db, identity.clerkId);
     const [order] = await db.select().from(orders).where(and(eq(orders.id, marketplaceOrderId), eq(orders.buyerId, user.id))).limit(1);
     if (!order || order.razorpayOrderId !== razorpayOrderId) return Response.json({ error: "Payment order does not match." }, { status: 400 });
-    const secret = process.env.RAZORPAY_TEST_KEY_SECRET;
-    if (!secret) return Response.json({ error: "Razorpay test mode is not configured." }, { status: 503 });
-    const signatureIsValid = await verifyRazorpaySignature(
-      razorpayOrderId,
-      razorpayPaymentId,
-      razorpaySignature,
-      secret,
-    );
-    if (!signatureIsValid) return Response.json({ error: "Payment signature could not be verified." }, { status: 400 });
+    const provider = paymentProvider("razorpay_test");
+    if (!provider) return Response.json({ error: "Razorpay test mode is not configured." }, { status: 503 });
+    const verification = await provider.verifyPayment({ providerOrderId: razorpayOrderId, providerPaymentId: razorpayPaymentId, signature: razorpaySignature });
+    if (!verification.verified) return Response.json({ error: "Payment signature could not be verified." }, { status: 400 });
     const [updated] = await db.update(orders).set({ paymentStatus: "paid", razorpayPaymentId, updatedAt: new Date().toISOString() }).where(eq(orders.id, order.id)).returning();
     return Response.json({ order: updated });
   } catch (error) {

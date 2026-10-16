@@ -4,6 +4,7 @@ import { listings, orders } from "../../../../db/schema";
 import { requireUser } from "../../../../lib/auth";
 import { actorFor, ensureUser, routeError } from "../../../../lib/marketplace";
 import { canBuy } from "../../../../lib/authorization";
+import { paymentProvider } from "../../../../lib/payment-provider";
 
 export const dynamic = "force-dynamic";
 
@@ -21,18 +22,18 @@ export async function POST(request: Request) {
     if (record.order.status !== "accepted") return Response.json({ error: "The seller must accept this request before payment." }, { status: 400 });
     if (record.order.paymentStatus === "paid") return Response.json({ error: "This order is already paid." }, { status: 400 });
 
-    const keyId = process.env.RAZORPAY_TEST_KEY_ID;
-    const keySecret = process.env.RAZORPAY_TEST_KEY_SECRET;
-    if (!keyId?.startsWith("rzp_test_") || !keySecret) return Response.json({ error: "Razorpay test mode is not configured." }, { status: 503 });
-    const response = await fetch("https://api.razorpay.com/v1/orders", {
-      method: "POST",
-      headers: { Authorization: `Basic ${btoa(`${keyId}:${keySecret}`)}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ amount: record.price * 100, currency: "INR", receipt: record.order.id.slice(0, 40), notes: { marketplace_order_id: record.order.id, environment: "test" } }),
+    const provider = paymentProvider("razorpay_test");
+    if (!provider) return Response.json({ error: "Razorpay test mode is not configured." }, { status: 503 });
+    const checkout = await provider.createCheckout({
+      intentId: record.order.id,
+      amount: record.price,
+      currency: "INR",
+      receipt: record.order.id,
+      metadata: { marketplace_order_id: record.order.id, environment: "test" },
     });
-    const razorpayOrder = await response.json() as { id?: string; amount?: number; currency?: string; error?: { description?: string } };
-    if (!response.ok || !razorpayOrder.id) return Response.json({ error: razorpayOrder.error?.description || "Could not create the test payment." }, { status: 502 });
-    await db.update(orders).set({ razorpayOrderId: razorpayOrder.id, paymentMethod: "razorpay_test", updatedAt: new Date().toISOString() }).where(eq(orders.id, record.order.id));
-    return Response.json({ keyId, razorpayOrderId: razorpayOrder.id, amount: razorpayOrder.amount, currency: razorpayOrder.currency, title: record.title });
+    if (!checkout.publicKeyId) return Response.json({ error: "Razorpay public test key is unavailable." }, { status: 503 });
+    await db.update(orders).set({ razorpayOrderId: checkout.providerOrderId, paymentMethod: "razorpay_test", updatedAt: new Date().toISOString() }).where(eq(orders.id, record.order.id));
+    return Response.json({ keyId: checkout.publicKeyId, razorpayOrderId: checkout.providerOrderId, amount: checkout.amount, currency: checkout.currency, title: record.title });
   } catch (error) {
     return routeError(error);
   }

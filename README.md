@@ -433,6 +433,23 @@ docker compose exec -T app sh -c 'RUN_CART_CHECKOUT_INTEGRATION=1 npx tsx --test
 node --env-file=.env.local scripts/migrate-refund-workflow.mjs
 ```
 
+### M‑31: Payment provider abstraction
+
+Payment operations now depend on one `PaymentProvider` contract rather than a provider-specific route implementation. Both adapters implement checkout creation, payment verification, and refunds: `internal_test` provides deterministic local behavior for the SKU checkout/refund workflow, while `razorpay_test` maps the same contract to Razorpay's test-mode order, signature-verification, and refund APIs.
+
+```mermaid
+flowchart LR
+  R[Payment routes and refund service] --> C[PaymentProvider contract]
+  C --> T[Internal test adapter]
+  C --> Z[Razorpay test adapter]
+  Z --> A[Razorpay test API]
+```
+
+- The marketplace payment-create and signature-verification routes now call the Razorpay adapter; provider authorization, request shape, paise conversion, response validation, and error normalization are kept in one server-only module.
+- The Razorpay adapter accepts only `rzp_test_` keys, sends ₹ values to Razorpay in paise, URL-encodes the provider payment ID for a refund, and uses the existing constant-time HMAC verification path. It does not expose the secret to the browser.
+- Contract tests execute the same checkout → verification (valid and invalid) → refund sequence against both adapters. The Razorpay test uses an injected transport: it asserts the exact `/v1/orders` and `/v1/payments/{id}/refund` requests, `125` rupees → `12500` paise conversion, Basic authorization shape, and sanitized error behavior without making a network request or creating a refund.
+- Scope: Razorpay integration is intentionally test mode. The live release does not invoke a real Razorpay checkout or refund during verification, and no live-money payment/refund claim is made.
+
 ## Resume-safe project description
 
 Use this now:
