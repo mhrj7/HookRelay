@@ -14,7 +14,7 @@ import { POST as checkoutPost } from "../app/api/checkout/orders/route";
 type HttpData = {
   error?: string;
   reservation?: { id: string };
-  order?: { orderId: string; paymentIntentId: string; outboxEventId: string; status: string; total: number; currency: string };
+  order?: { orderId: string; paymentIntentId: string; outboxEventId: string; status: string; total: number; currency: string; replayed?: boolean };
 };
 
 test("M-26 HTTP: validated cart and reservations atomically create order, payment intent, and outbox", {
@@ -44,7 +44,7 @@ test("M-26 HTTP: validated cart and reservations atomically create order, paymen
     return { status: response.status, data: await response.json() as HttpData };
   }
   try {
-    for (const file of ["0010_inventory_reservations.sql", "0011_reservation_release.sql", "0012_buyer_cart.sql", "0013_cart_checkout.sql"]) {
+    for (const file of ["0010_inventory_reservations.sql", "0011_reservation_release.sql", "0012_buyer_cart.sql", "0013_cart_checkout.sql", "0014_checkout_idempotency.sql"]) {
       await db.execute(sql.raw(await readFile(new URL(`../drizzle/${file}`, import.meta.url), "utf8")));
     }
     const clerkIds = ["seller", "buyer-a", "buyer-b"].map(role => `m26-${role}-${tag}`);
@@ -72,13 +72,21 @@ test("M-26 HTTP: validated cart and reservations atomically create order, paymen
     }
 
     assert.equal((await post(buyerBToken, "/api/cart", { variantId: variantIds[0], quantity: 2 })).status, 200);
-    const invalid = await post(buyerBToken, "/api/checkout/orders", { reservationIds: [reservationIds[0]] });
+    const invalid = await post(buyerBToken, "/api/checkout/orders", { key: crypto.randomUUID(), reservationIds: [reservationIds[0]] });
     assert.equal(invalid.status, 409);
     assert.equal((await db.select().from(commerceOrders)).length, 0); assert.equal((await db.select().from(paymentIntents)).length, 0); assert.equal((await db.select().from(outboxEvents)).length, 0);
     assert.equal((await db.select().from(cartItems).innerJoin(carts, eq(cartItems.cartId, carts.id)).where(eq(carts.buyerId, userIds[2]))).length, 1, "Failed checkout leaves cart intact");
 
-    const checkout = await post(buyerAToken, "/api/checkout/orders", { reservationIds });
+    const checkoutKey = crypto.randomUUID();
+    const duplicatePair = await Promise.all([
+      post(buyerAToken, "/api/checkout/orders", { key: checkoutKey, reservationIds }),
+      post(buyerAToken, "/api/checkout/orders", { key: checkoutKey, reservationIds }),
+    ]);
+    assert.deepEqual(duplicatePair.map(result => result.status).sort(), [200, 201]);
+    const checkout = duplicatePair.find(result => result.status === 201)!;
+    const replay = duplicatePair.find(result => result.status === 200)!;
     assert.equal(checkout.status, 201); assert.ok(checkout.data.order); assert.equal(checkout.data.order.status, "pending_payment"); assert.equal(checkout.data.order.total, 450); assert.equal(checkout.data.order.currency, "INR");
+    assert.deepEqual(replay.data.order, { ...checkout.data.order, replayed: true });
     const [order] = await db.select().from(commerceOrders).where(eq(commerceOrders.id, checkout.data.order.orderId));
     const items = await db.select().from(commerceOrderItems).where(eq(commerceOrderItems.orderId, order.id));
     const [intent] = await db.select().from(paymentIntents).where(eq(paymentIntents.orderId, order.id));
@@ -88,10 +96,14 @@ test("M-26 HTTP: validated cart and reservations atomically create order, paymen
     assert.equal(event.id, checkout.data.order.outboxEventId); assert.equal(event.eventType, "order.created"); assert.equal(event.status, "pending"); assert.deepEqual(JSON.parse(event.payload), { total: 450, buyerId: userIds[1], orderId: order.id, currency: "INR", itemCount: 2 });
     assert.equal((await db.select().from(cartItems).innerJoin(carts, eq(cartItems.cartId, carts.id)).where(eq(carts.buyerId, userIds[1]))).length, 0, "Successful checkout clears only the buyer's items");
 
+    const changedPayload = await post(buyerAToken, "/api/checkout/orders", { key: checkoutKey, reservationIds: [reservationIds[0]] });
+    assert.equal(changedPayload.status, 409); assert.match(changedPayload.data.error ?? "", /idempotency key/i);
+    assert.equal((await db.select().from(commerceOrders)).length, 1); assert.equal((await db.select().from(paymentIntents)).length, 1); assert.equal((await db.select().from(outboxEvents)).length, 1);
+
     assert.equal((await post(buyerAToken, "/api/cart", { variantId: variantIds[0], quantity: 2 })).status, 200);
-    const reused = await post(buyerAToken, "/api/checkout/orders", { reservationIds: [reservationIds[0]] });
+    const reused = await post(buyerAToken, "/api/checkout/orders", { key: crypto.randomUUID(), reservationIds: [reservationIds[0]] });
     assert.equal(reused.status, 409); assert.equal((await db.select().from(commerceOrders)).length, 1); assert.equal((await db.select().from(paymentIntents)).length, 1); assert.equal((await db.select().from(outboxEvents)).length, 1);
-    console.log("M-26: invalid checkout rolled back; valid cart+holds atomically created 1 order, 2 items, 1 payment intent, 1 order.created outbox event; reservation reuse rejected.");
+    console.log("M-26/M-27: invalid checkout rolled back; valid checkout atomically created one record set; same key replayed identical IDs without duplicates; changed payload and reservation reuse rejected.");
   } finally {
     await db.delete(outboxEvents).where(eq(outboxEvents.aggregateType, "order"));
     await db.delete(paymentIntents).where(inArray(paymentIntents.orderId, (await db.select({ id: commerceOrders.id }).from(commerceOrders).where(eq(commerceOrders.buyerId, userIds[1] ?? -1))).map(row => row.id)));

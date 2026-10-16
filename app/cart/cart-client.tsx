@@ -83,7 +83,7 @@ export default function CartClient() {
         reservationIds.push(reservationId);
       }
       setNotice("Creating the order, payment intent, and event record…");
-      const { response, data } = await post("/api/checkout/orders", { reservationIds });
+      const { response, data } = await post("/api/checkout/orders", { key: crypto.randomUUID(), reservationIds });
       if (!response.ok || !data.order) throw new Error(data.error ?? "Could not create the order.");
       await load();
       setNotice(`Order ${data.order.orderId} created for ₹${data.order.total.toLocaleString("en-IN")}. Payment intent ${data.order.paymentIntentId} is ready; no payment has been taken.`);

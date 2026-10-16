@@ -16,10 +16,10 @@ export async function POST(request: Request) {
       forbidden: "This account cannot create buyer orders.", cart_empty: "Your cart is empty.",
       reservation_mismatch: "Cart prices, quantities, or reservations changed. Reserve every current cart SKU again.",
       reservation_used: "One of these reservations already created an order.", conflict: "Checkout conflicted with another request. Refresh and try again.",
-      invalid: "Checkout reservations are invalid.",
+      key_conflict: "This idempotency key was already used for a different checkout.", invalid: "Checkout reservations or idempotency key are invalid.",
     };
     if (outcome.error) return Response.json({ error: messages[outcome.error] ?? "Checkout could not be created." }, { status: outcome.error === "forbidden" ? 403 : outcome.error === "cart_empty" ? 400 : 409 });
-    return Response.json({ order: outcome }, { status: 201, headers: { "Cache-Control": "no-store" } });
+    return Response.json({ order: outcome }, { status: outcome.replayed ? 200 : 201, headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     return routeError(error);
   }

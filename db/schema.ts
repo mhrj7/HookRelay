@@ -199,12 +199,14 @@ export const cartItems = pgTable("cart_items", {
 export const commerceOrders = pgTable("commerce_orders", {
   id: text("id").primaryKey(),
   buyerId: integer("buyer_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  idempotencyKey: text("idempotency_key").notNull(),
+  requestFingerprint: text("request_fingerprint").notNull(),
   status: text("status").notNull().default("pending_payment"),
   currency: text("currency").notNull().default("INR"),
   total: integer("total").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`clock_timestamp()`),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`clock_timestamp()`),
-}, t => [index("idx_commerce_orders_buyer_created").on(t.buyerId, t.createdAt), check("commerce_orders_total_check", sql`${t.total} > 0`)]);
+}, t => [index("idx_commerce_orders_buyer_created").on(t.buyerId, t.createdAt), uniqueIndex("commerce_orders_buyer_id_idempotency_key_key").on(t.buyerId, t.idempotencyKey), check("commerce_orders_total_check", sql`${t.total} > 0`)]);
 
 export const commerceOrderItems = pgTable("commerce_order_items", {
   orderId: text("order_id").notNull().references(() => commerceOrders.id, { onDelete: "cascade" }),

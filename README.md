@@ -344,6 +344,35 @@ docker compose exec -T app sh -c 'RUN_CART_CHECKOUT_INTEGRATION=1 npx tsx --test
 node --env-file=.env.local scripts/migrate-cart-checkout.mjs
 ```
 
+### M‑27: Idempotent checkout and payment-intent creation
+
+Every cart checkout now requires a buyer-generated idempotency key. PostgreSQL serializes requests for the same buyer/key before reading or writing checkout state, so retries return the original order, payment intent and outbox event instead of creating duplicates.
+
+```mermaid
+sequenceDiagram
+  participant R1 as Request 1
+  participant R2 as Concurrent retry
+  participant D as PostgreSQL
+  R1->>D: buyer + key + reservation set
+  R2->>D: same buyer + key + reservation set
+  D->>D: Advisory transaction lock on buyer:key
+  D-->>R1: Create order/payment intent/outbox (201)
+  D-->>R2: Return original IDs and total (200)
+  Note over D: Same key + different reservation fingerprint = conflict
+```
+
+- Keys are scoped per buyer and protected by a unique database index. Different buyers may safely use the same key.
+- A sorted reservation-set fingerprint binds the key to its original request. Reordering the same reservations is a retry; changing the set returns a conflict instead of returning an unrelated result.
+- Payment-intent creation is inside the same idempotent database function, so a retry cannot produce a second payment intent even after the cart has been cleared by the original request.
+- Local concurrent HTTP/SQL evidence on 16 October 2026: two simultaneous requests with the same buyer, key and two reservations returned one `201` and one replay `200`; both returned the same order, payment-intent and outbox IDs and ₹450 total. Database counts remained exactly one order, one payment intent and one outbox event. Reusing that key with a different reservation set returned `409` without new records.
+- Scope: this proves application/database idempotency for VyapaarCart's internal checkout payment-intent record. No external payment-provider request or capture is claimed.
+
+```bash
+# Covered by the cart-checkout integration suite; local database only
+docker compose exec -T app sh -c 'RUN_CART_CHECKOUT_INTEGRATION=1 npx tsx --test tests/cart-checkout.integration.test.ts'
+node --env-file=.env.local scripts/migrate-checkout-idempotency.mjs
+```
+
 ## Resume-safe project description
 
 Use this now:
