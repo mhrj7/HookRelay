@@ -241,6 +241,39 @@ export const outboxEvents = pgTable("outbox_events", {
   publishedAt: timestamp("published_at", { withTimezone: true }),
 }, t => [index("idx_outbox_events_status_created").on(t.status, t.createdAt), uniqueIndex("outbox_events_aggregate_event_key").on(t.aggregateType, t.aggregateId, t.eventType)]);
 
+export const refunds = pgTable("refunds", {
+  id: text("id").primaryKey(),
+  orderId: text("order_id").notNull().references(() => commerceOrders.id, { onDelete: "restrict" }),
+  paymentIntentId: text("payment_intent_id").notNull().references(() => paymentIntents.id, { onDelete: "restrict" }),
+  requestedBy: integer("requested_by").notNull().references(() => users.id, { onDelete: "restrict" }),
+  idempotencyKey: text("idempotency_key").notNull(),
+  provider: text("provider").notNull(),
+  providerRefundId: text("provider_refund_id"),
+  amount: integer("amount").notNull(),
+  currency: text("currency").notNull(),
+  reason: text("reason").notNull(),
+  status: text("status").notNull().default("processing"),
+  providerResponse: text("provider_response"),
+  failureReason: text("failure_reason"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`clock_timestamp()`),
+  completedAt: timestamp("completed_at", { withTimezone: true }),
+}, t => [
+  uniqueIndex("refunds_order_id_key").on(t.orderId),
+  uniqueIndex("refunds_requested_by_idempotency_key_key").on(t.requestedBy, t.idempotencyKey),
+  check("refunds_amount_check", sql`${t.amount} > 0`),
+]);
+
+export const refundAudits = pgTable("refund_audits", {
+  id: text("id").primaryKey(),
+  refundId: text("refund_id").notNull().references(() => refunds.id, { onDelete: "restrict" }),
+  actorId: integer("actor_id").notNull().references(() => users.id, { onDelete: "restrict" }),
+  eventType: text("event_type").notNull(),
+  fromStatus: text("from_status"),
+  toStatus: text("to_status").notNull(),
+  metadata: text("metadata").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`clock_timestamp()`),
+}, t => [index("idx_refund_audits_refund_created").on(t.refundId, t.createdAt)]);
+
 export const productVariantAttributes = pgTable("product_variant_attributes", {
   variantId: text("variant_id").notNull().references(() => productVariants.id, { onDelete: "cascade" }),
   key: text("key").notNull(),

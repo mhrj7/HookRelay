@@ -5,23 +5,25 @@ import { readFile } from "node:fs/promises";
 import { eq, inArray, sql } from "drizzle-orm";
 import { drizzle as drizzlePostgres } from "drizzle-orm/postgres-js";
 import { getDb } from "../db";
-import { cartItems, carts, categories, commerceOrderItems, commerceOrders, inventoryReservations, outboxEvents, paymentIntents, products, productVariants, stores, users, warehouses, warehouseStock } from "../db/schema";
+import { cartItems, carts, categories, commerceOrderItems, commerceOrders, inventoryReservations, outboxEvents, paymentIntents, products, productVariants, refundAudits, refunds, stores, users, warehouses, warehouseStock } from "../db/schema";
 import { issueAccessToken } from "../lib/api-tokens";
 import { POST as cartPost } from "../app/api/cart/route";
 import { POST as reservationPost } from "../app/api/checkout/reservations/route";
 import { POST as checkoutPost } from "../app/api/checkout/orders/route";
 import { POST as cancellationPost } from "../app/api/checkout/orders/[id]/cancel/route";
 import { GET as availabilityGet } from "../app/api/checkout/availability/route";
+import { POST as refundPost } from "../app/api/checkout/orders/[id]/refunds/route";
 
 type HttpData = {
   error?: string;
   reservation?: { id: string };
   order?: { orderId: string; paymentIntentId: string; outboxEventId: string; status: string; total: number; currency: string; replayed?: boolean };
   cancellation?: { orderId: string; status: string; cancelledAt: string; outboxEventId: string; releasedQuantity: number; replayed: boolean };
+  refund?: { refundId: string; paymentIntentId: string; provider: string; providerRefundId: string; amount: number; currency: string; reason: string; status: string; completedAt: string; outboxEventId: string; replayed: boolean };
   item?: { available: number };
 };
 
-test("M-26/M-27/M-29 HTTP: checkout is atomic and idempotent; authorized cancellation restores stock", {
+test("M-26/M-27/M-29/M-30 HTTP: checkout, cancellation, and authorized refund workflows persist exact effects", {
   skip: process.env.RUN_CART_CHECKOUT_INTEGRATION !== "1", timeout: 30000,
 }, async () => {
   assert.match(process.env.DATABASE_URL ?? "", /@(db|localhost|127\.0\.0\.1)(:|\/)/);
@@ -35,11 +37,13 @@ test("M-26/M-27/M-29 HTTP: checkout is atomic and idempotent; authorized cancell
       const request = new Request(`http://127.0.0.1${incoming.url}`, { method: incoming.method, headers, ...(incoming.method === "GET" || incoming.method === "HEAD" ? {} : { body }) });
       const path = new URL(request.url).pathname;
       const cancelMatch = path.match(/^\/api\/checkout\/orders\/([^/]+)\/cancel$/);
+      const refundMatch = path.match(/^\/api\/checkout\/orders\/([^/]+)\/refunds$/);
       const response = path === "/api/cart" ? await cartPost(request)
         : path === "/api/checkout/reservations" ? await reservationPost(request)
           : path === "/api/checkout/orders" ? await checkoutPost(request)
             : path === "/api/checkout/availability" ? await availabilityGet(request)
               : cancelMatch ? await cancellationPost(request, { params: Promise.resolve({ id: cancelMatch[1] }) })
+                : refundMatch ? await refundPost(request, { params: Promise.resolve({ id: refundMatch[1] }) })
                 : new Response(null, { status: 404 });
       outgoing.writeHead(response.status, Object.fromEntries(response.headers)); outgoing.end(await response.text());
     } catch (error) { console.error(error); outgoing.writeHead(500); outgoing.end("Test handler failed"); }
@@ -59,12 +63,13 @@ test("M-26/M-27/M-29 HTTP: checkout is atomic and idempotent; authorized cancell
     return { status: response.status, data: await response.json() as HttpData };
   }
   try {
-    for (const file of ["0010_inventory_reservations.sql", "0011_reservation_release.sql", "0012_buyer_cart.sql", "0013_cart_checkout.sql", "0014_checkout_idempotency.sql", "0015_order_cancellation.sql"]) {
+    for (const file of ["0010_inventory_reservations.sql", "0011_reservation_release.sql", "0012_buyer_cart.sql", "0013_cart_checkout.sql", "0014_checkout_idempotency.sql", "0015_order_cancellation.sql", "0016_refund_workflow.sql"]) {
       await db.execute(sql.raw(await readFile(new URL(`../drizzle/${file}`, import.meta.url), "utf8")));
     }
-    const clerkIds = ["seller", "buyer-a", "buyer-b"].map(role => `m26-${role}-${tag}`);
+    const clerkIds = ["seller", "buyer-a", "buyer-b", "admin"].map(role => `m26-${role}-${tag}`);
     for (let i = 0; i < clerkIds.length; i++) {
-      const [user] = await db.insert(users).values({ clerkId: clerkIds[i], role: i ? "buyer" : "seller", sellerApprovalStatus: i ? "not_requested" : "approved" }).returning(); userIds.push(user.id);
+      const role = i === 0 ? "seller" : i === 3 ? "admin" : "buyer";
+      const [user] = await db.insert(users).values({ clerkId: clerkIds[i], role, sellerApprovalStatus: i === 0 ? "approved" : "not_requested" }).returning(); userIds.push(user.id);
     }
     await db.insert(stores).values({ id: storeId, ownerId: userIds[0], name: "M26 local fixture", slug: tag, city: "Test", description: "Local only" });
     await db.insert(categories).values({ id: tag, name: "Test", slug: tag });
@@ -75,7 +80,7 @@ test("M-26/M-27/M-29 HTTP: checkout is atomic and idempotent; authorized cancell
     ]);
     await db.insert(warehouses).values({ id: warehouseId, storeId, name: "M26 warehouse", city: "Test", address: "Local", postcode: "560001" });
     await db.insert(warehouseStock).values(variantIds.map(variantId => ({ warehouseId, variantId, quantity: 10 })));
-    const [sellerToken, buyerAToken, buyerBToken] = await Promise.all(clerkIds.map(clerkId => issueAccessToken({ clerkId })));
+    const [sellerToken, buyerAToken, buyerBToken, adminToken] = await Promise.all(clerkIds.map(clerkId => issueAccessToken({ clerkId })));
     void sellerToken;
 
     assert.equal((await post(buyerAToken, "/api/cart", { variantId: variantIds[0], quantity: 2 })).status, 200);
@@ -145,8 +150,43 @@ test("M-26/M-27/M-29 HTTP: checkout is atomic and idempotent; authorized cancell
     assert.equal(cancellationReplay.status, 200);
     assert.deepEqual(cancellationReplay.data.cancellation, { ...cancellation.data.cancellation, replayed: true });
     assert.equal((await db.select().from(outboxEvents).where(eq(outboxEvents.aggregateId, order.id))).length, 2, "Retry creates no duplicate cancellation event");
-    console.log("M-26/M-27/M-29: checkout atomicity/idempotency passed; stranger and invalid-state cancellation were rejected; owner cancellation restored 8→10 and 9→10 availability exactly once.");
+
+    assert.equal((await post(buyerAToken, "/api/cart", { variantId: variantIds[0], quantity: 1 })).status, 200);
+    const refundReservation = await post(buyerAToken, "/api/checkout/reservations", { variantId: variantIds[0], quantity: 1, key: crypto.randomUUID() });
+    assert.equal(refundReservation.status, 200); assert.ok(refundReservation.data.reservation);
+    const refundableCheckout = await post(buyerAToken, "/api/checkout/orders", { key: crypto.randomUUID(), reservationIds: [refundReservation.data.reservation.id] });
+    assert.equal(refundableCheckout.status, 201); assert.ok(refundableCheckout.data.order);
+    const refundPath = `/api/checkout/orders/${refundableCheckout.data.order.orderId}/refunds`;
+    const invalidStateRefund = await post(adminToken, refundPath, { key: crypto.randomUUID(), reason: "Requested before payment" });
+    assert.equal(invalidStateRefund.status, 409); assert.match(invalidStateRefund.data.error ?? "", /paid/i);
+    await db.update(commerceOrders).set({ status: "paid" }).where(eq(commerceOrders.id, refundableCheckout.data.order.orderId));
+    await db.update(paymentIntents).set({ status: "succeeded" }).where(eq(paymentIntents.id, refundableCheckout.data.order.paymentIntentId));
+    const refundKey = crypto.randomUUID();
+    const deniedRefund = await post(buyerAToken, refundPath, { key: refundKey, reason: "Customer returned item" });
+    assert.equal(deniedRefund.status, 403, "A buyer cannot issue their own refund");
+    const refund = await post(adminToken, refundPath, { key: refundKey, reason: "Customer returned item" });
+    assert.equal(refund.status, 201); assert.ok(refund.data.refund); assert.equal(refund.data.refund.status, "succeeded");
+    assert.equal(refund.data.refund.amount, 125); assert.equal(refund.data.refund.currency, "INR"); assert.equal(refund.data.refund.provider, "internal_test");
+    assert.match(refund.data.refund.providerRefundId, /^rf_test_[a-f0-9]{24}$/);
+    const [storedRefund] = await db.select().from(refunds).where(eq(refunds.id, refund.data.refund.refundId));
+    const storedAudits = await db.select().from(refundAudits).where(eq(refundAudits.refundId, storedRefund.id));
+    const [refundedOrder] = await db.select().from(commerceOrders).where(eq(commerceOrders.id, refundableCheckout.data.order.orderId));
+    const [refundedIntent] = await db.select().from(paymentIntents).where(eq(paymentIntents.id, refundableCheckout.data.order.paymentIntentId));
+    assert.equal(storedRefund.status, "succeeded"); assert.equal(storedRefund.providerRefundId, refund.data.refund.providerRefundId); assert.ok(storedRefund.completedAt);
+    assert.deepEqual(JSON.parse(storedRefund.providerResponse ?? "{}"), { provider: "internal_test", action: "refund", amount: 125, currency: "INR", idempotencyKey: refundKey });
+    assert.deepEqual(storedAudits.map(row => row.eventType).sort(), ["refund.requested", "refund.succeeded"]);
+    assert.equal(refundedOrder.status, "refunded"); assert.equal(refundedIntent.status, "refunded");
+    assert.equal((await db.select().from(outboxEvents).where(eq(outboxEvents.aggregateId, refundedOrder.id))).filter(row => row.eventType === "order.refunded").length, 1);
+    const refundReplay = await post(adminToken, refundPath, { key: refundKey, reason: "Customer returned item" });
+    assert.equal(refundReplay.status, 200); assert.deepEqual(refundReplay.data.refund, { ...refund.data.refund, replayed: true });
+    const conflictingRefund = await post(adminToken, refundPath, { key: crypto.randomUUID(), reason: "Different refund request" });
+    assert.equal(conflictingRefund.status, 409);
+    assert.equal((await db.select().from(refunds).where(eq(refunds.orderId, refundedOrder.id))).length, 1);
+    assert.equal((await db.select().from(refundAudits).where(eq(refundAudits.refundId, storedRefund.id))).length, 2);
+    console.log("M-26/M-27/M-29/M-30: checkout and cancellation passed; admin provider refund persisted one provider result, refunded states, two audit events, one outbox event, and idempotent replay.");
   } finally {
+    await db.delete(refundAudits).where(inArray(refundAudits.refundId, (await db.select({ id: refunds.id }).from(refunds).where(inArray(refunds.requestedBy, userIds.length ? userIds : [-1]))).map(row => row.id)));
+    await db.delete(refunds).where(inArray(refunds.requestedBy, userIds.length ? userIds : [-1]));
     await db.delete(outboxEvents).where(eq(outboxEvents.aggregateType, "order"));
     await db.delete(paymentIntents).where(inArray(paymentIntents.orderId, (await db.select({ id: commerceOrders.id }).from(commerceOrders).where(eq(commerceOrders.buyerId, userIds[1] ?? -1))).map(row => row.id)));
     await db.delete(commerceOrders).where(inArray(commerceOrders.buyerId, userIds.length ? userIds : [-1]));

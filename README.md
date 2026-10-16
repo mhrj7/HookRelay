@@ -399,6 +399,40 @@ docker compose exec -T app sh -c 'RUN_CART_CHECKOUT_INTEGRATION=1 npx tsx --test
 node --env-file=.env.local scripts/migrate-order-cancellation.mjs
 ```
 
+### M‑30: Authorized refund workflow
+
+Administrators can issue a full refund only after an order and its payment intent are both in paid/succeeded states. The API creates an idempotent refund request, invokes the configured payment provider through a provider-neutral interface, and then atomically persists the provider result, refunded order/payment states, immutable audit history and a pending `order.refunded` outbox event.
+
+```mermaid
+sequenceDiagram
+  participant A as Administrator
+  participant API as Refund API
+  participant DB as PostgreSQL
+  participant P as PaymentProvider
+  A->>API: order + key + reason
+  API->>DB: Begin refund and audit request
+  DB-->>API: Paid order, provider, exact amount
+  API->>P: Idempotent full-refund call
+  P-->>API: Provider refund ID + response
+  API->>DB: Complete in one transaction
+  DB->>DB: Refund + order/payment states + audit + outbox
+  DB-->>API: Persisted refund result
+```
+
+- Authorization is deliberately admin-only. Buyers, including the order owner, cannot issue refunds.
+- The amount, currency, payment intent and provider come from persisted server records; the request may provide only a bounded reason and idempotency key.
+- `PaymentProvider` separates refund orchestration from the current `internal_test` adapter. That adapter returns a deterministic provider refund ID for the same payment-intent/key pair, modelling a provider idempotency contract without claiming a real money movement.
+- `refunds` stores the provider call result and raw response. `refund_audits` stores `refund.requested` and `refund.succeeded` transitions. Completion changes the order to `refunded`, the payment intent to `refunded`, and creates one `order.refunded` outbox event in one database transaction.
+- A provider exception is persisted as `failed` plus a `refund.failed` audit record; order and payment states remain paid/succeeded. Retrying the same key reuses the refund record and provider idempotency key.
+- Local real HTTP/PostgreSQL evidence on 16 October 2026: unpaid refund was rejected; buyer refund was rejected; an admin refunded exactly ₹125; the deterministic provider ID/response, both state changes, two audit events and one outbox event were persisted; same-key replay returned the original result and a new key created no duplicate.
+- Scope: the current verified provider is an internal test adapter. No Razorpay/Stripe refund or real money movement is claimed; provider contract parity is tracked separately in M‑31.
+
+```bash
+# Covered by the cart-checkout integration suite; local database only
+docker compose exec -T app sh -c 'RUN_CART_CHECKOUT_INTEGRATION=1 npx tsx --test tests/cart-checkout.integration.test.ts'
+node --env-file=.env.local scripts/migrate-refund-workflow.mjs
+```
+
 ## Resume-safe project description
 
 Use this now:
