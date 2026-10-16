@@ -2,7 +2,8 @@ import { and, eq } from "drizzle-orm";
 import { getDb } from "../../../../db";
 import { orders, shipmentEvents, shipments } from "../../../../db/schema";
 import { requireUser } from "../../../../lib/auth";
-import { nextShipmentStep, shipmentMessage } from "../../../../lib/delivery";
+import { advanceShipmentRecord } from "../../../../lib/shipment-service";
+import { shippingProvider } from "../../../../lib/shipping-provider";
 import { actorFor, routeError } from "../../../../lib/marketplace";
 import { canManageSeller, sellerAccountId } from "../../../../lib/authorization";
 
@@ -20,14 +21,13 @@ export async function PATCH(request: Request, { params }: Context) {
     if (!sellerId || !canManageSeller(seller, sellerId)) return Response.json({ error: "Only seller accounts can update shipments." }, { status: 403 });
     const [record] = await db.select({ shipment: shipments, order: orders }).from(shipments).innerJoin(orders, eq(shipments.orderId, orders.id)).where(and(eq(shipments.id, id), eq(orders.sellerId, sellerId))).limit(1);
     if (!record) return Response.json({ error: "Shipment not found." }, { status: 404 });
-    const next = nextShipmentStep(record.shipment.status);
-    if (!next) return Response.json({ error: "This shipment is already complete." }, { status: 409 });
-
     const now = new Date().toISOString();
-    const [shipment] = await db.update(shipments).set({ status: next, updatedAt: now }).where(eq(shipments.id, id)).returning();
-    await db.insert(shipmentEvents).values({ id: crypto.randomUUID(), shipmentId: id, status: next, message: shipmentMessage(next), occurredAt: now });
-    if (next === "delivered") await db.update(orders).set({ status: "completed", updatedAt: now }).where(eq(orders.id, record.order.id));
-    return Response.json({ shipment, next });
+    const next = await advanceShipmentRecord(record.shipment, now, shippingProvider());
+    if (!next) return Response.json({ error: "This shipment is already complete." }, { status: 409 });
+    const [shipment] = await db.update(shipments).set({ status: next.shipment.status, updatedAt: now }).where(eq(shipments.id, id)).returning();
+    await db.insert(shipmentEvents).values({ id: crypto.randomUUID(), shipmentId: id, ...next.event });
+    if (next.shipment.status === "delivered") await db.update(orders).set({ status: "completed", updatedAt: now }).where(eq(orders.id, record.order.id));
+    return Response.json({ shipment, next: next.shipment.status });
   } catch (error) {
     return routeError(error);
   }

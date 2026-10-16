@@ -8,7 +8,8 @@ import {
   shipments,
 } from "../../../../../db/schema";
 import { requireUser } from "../../../../../lib/auth";
-import { trackingNumber } from "../../../../../lib/delivery";
+import { createShipmentRecord } from "../../../../../lib/shipment-service";
+import { shippingProvider } from "../../../../../lib/shipping-provider";
 import { actorFor, routeError } from "../../../../../lib/marketplace";
 import { canManageSeller, sellerAccountId } from "../../../../../lib/authorization";
 
@@ -82,30 +83,30 @@ export async function POST(request: Request, { params }: Context) {
     if (existing) return Response.json({ shipment: existing, reused: true });
 
     const now = new Date().toISOString();
-    const shipment = {
-      id: crypto.randomUUID(),
+    const prepared = await createShipmentRecord(orderId, {
       orderId,
-      provider: "VyapaarCart sandbox carrier",
-      trackingNumber: trackingNumber(),
-      status: "label_created",
-      eta: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString(),
+      recipient: {
+        name: order.shippingName,
+        email: order.shippingEmail,
+        phone: order.shippingPhone,
+        address: order.shippingAddress,
+        city: order.shippingCity,
+        state: order.shippingState,
+        pincode: order.shippingPincode,
+      },
       createdAt: now,
-      updatedAt: now,
-    };
-    await db.insert(shipments).values(shipment);
+    }, shippingProvider());
+    await db.insert(shipments).values(prepared.shipment);
     await db.insert(shipmentEvents).values({
       id: crypto.randomUUID(),
-      shipmentId: shipment.id,
-      status: shipment.status,
-      message:
-        "Test shipping label created. Use the tracking buttons to simulate delivery updates.",
-      occurredAt: now,
+      shipmentId: prepared.shipment.id,
+      ...prepared.event,
     });
     await db
       .update(orders)
       .set({ status: "ready_for_pickup", updatedAt: now })
       .where(eq(orders.id, orderId));
-    return Response.json({ shipment }, { status: 201 });
+    return Response.json({ shipment: prepared.shipment }, { status: 201 });
   } catch (error) {
     return routeError(error);
   }

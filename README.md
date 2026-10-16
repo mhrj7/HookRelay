@@ -450,6 +450,22 @@ flowchart LR
 - Contract tests execute the same checkout → verification (valid and invalid) → refund sequence against both adapters. The Razorpay test uses an injected transport: it asserts the exact `/v1/orders` and `/v1/payments/{id}/refund` requests, `125` rupees → `12500` paise conversion, Basic authorization shape, and sanitized error behavior without making a network request or creating a refund.
 - Scope: Razorpay integration is intentionally test mode. The live release does not invoke a real Razorpay checkout or refund during verification, and no live-money payment/refund claim is made.
 
+### M‑33: Shipping and tracking abstraction
+
+Shipment creation and tracking advancement now depend on a `ShippingProvider` contract. The live application uses `LocalSandboxShippingProvider`, preserving the existing test delivery lifecycle, while the order-domain service accepts any provider implementing the same create/advance operations.
+
+```mermaid
+flowchart LR
+  O[Order shipment routes] --> D[Shipment domain service]
+  D --> C[ShippingProvider contract]
+  C --> S[Local sandbox carrier]
+  C --> M[Mock carrier in contract test]
+```
+
+- Provider output owns carrier name, tracking number, status, ETA, event message and optional carrier identifiers. The route persists those neutral results and updates the order only when the returned tracking state is `delivered`.
+- The M‑33 test injects a mock carrier, verifies a provider-produced label and metadata are persisted into the domain record, advances the same record to `picked_up`, and confirms the completed state produces no additional transition. No route or order-domain code changes for the mock.
+- Scope: the default provider remains the local deterministic simulator. This is an abstraction milestone, not a Shiprocket/Delhivery integration or a real courier-booking claim.
+
 ## Resume-safe project description
 
 Use this now:
