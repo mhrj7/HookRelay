@@ -206,6 +206,7 @@ export const commerceOrders = pgTable("commerce_orders", {
   total: integer("total").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`clock_timestamp()`),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`clock_timestamp()`),
+  cancelledAt: timestamp("cancelled_at", { withTimezone: true }),
 }, t => [index("idx_commerce_orders_buyer_created").on(t.buyerId, t.createdAt), uniqueIndex("commerce_orders_buyer_id_idempotency_key_key").on(t.buyerId, t.idempotencyKey), check("commerce_orders_total_check", sql`${t.total} > 0`)]);
 
 export const commerceOrderItems = pgTable("commerce_order_items", {

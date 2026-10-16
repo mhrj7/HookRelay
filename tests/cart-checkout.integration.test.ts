@@ -10,14 +10,18 @@ import { issueAccessToken } from "../lib/api-tokens";
 import { POST as cartPost } from "../app/api/cart/route";
 import { POST as reservationPost } from "../app/api/checkout/reservations/route";
 import { POST as checkoutPost } from "../app/api/checkout/orders/route";
+import { POST as cancellationPost } from "../app/api/checkout/orders/[id]/cancel/route";
+import { GET as availabilityGet } from "../app/api/checkout/availability/route";
 
 type HttpData = {
   error?: string;
   reservation?: { id: string };
   order?: { orderId: string; paymentIntentId: string; outboxEventId: string; status: string; total: number; currency: string; replayed?: boolean };
+  cancellation?: { orderId: string; status: string; cancelledAt: string; outboxEventId: string; releasedQuantity: number; replayed: boolean };
+  item?: { available: number };
 };
 
-test("M-26 HTTP: validated cart and reservations atomically create order, payment intent, and outbox", {
+test("M-26/M-27/M-29 HTTP: checkout is atomic and idempotent; authorized cancellation restores stock", {
   skip: process.env.RUN_CART_CHECKOUT_INTEGRATION !== "1", timeout: 30000,
 }, async () => {
   assert.match(process.env.DATABASE_URL ?? "", /@(db|localhost|127\.0\.0\.1)(:|\/)/);
@@ -27,11 +31,18 @@ test("M-26 HTTP: validated cart and reservations atomically create order, paymen
     try {
       const chunks: Buffer[] = []; for await (const chunk of incoming) chunks.push(Buffer.from(chunk));
       const headers = new Headers(); for (const [key, value] of Object.entries(incoming.headers)) if (value) headers.set(key, Array.isArray(value) ? value.join(",") : value);
-      const request = new Request(`http://127.0.0.1${incoming.url}`, { method: incoming.method, headers, body: Buffer.concat(chunks).toString() });
+      const body = Buffer.concat(chunks).toString();
+      const request = new Request(`http://127.0.0.1${incoming.url}`, { method: incoming.method, headers, ...(incoming.method === "GET" || incoming.method === "HEAD" ? {} : { body }) });
       const path = new URL(request.url).pathname;
-      const response = path === "/api/cart" ? await cartPost(request) : path === "/api/checkout/reservations" ? await reservationPost(request) : path === "/api/checkout/orders" ? await checkoutPost(request) : new Response(null, { status: 404 });
+      const cancelMatch = path.match(/^\/api\/checkout\/orders\/([^/]+)\/cancel$/);
+      const response = path === "/api/cart" ? await cartPost(request)
+        : path === "/api/checkout/reservations" ? await reservationPost(request)
+          : path === "/api/checkout/orders" ? await checkoutPost(request)
+            : path === "/api/checkout/availability" ? await availabilityGet(request)
+              : cancelMatch ? await cancellationPost(request, { params: Promise.resolve({ id: cancelMatch[1] }) })
+                : new Response(null, { status: 404 });
       outgoing.writeHead(response.status, Object.fromEntries(response.headers)); outgoing.end(await response.text());
-    } catch { outgoing.writeHead(500); outgoing.end("Test handler failed"); }
+    } catch (error) { console.error(error); outgoing.writeHead(500); outgoing.end("Test handler failed"); }
   });
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   const address = server.address(); assert.ok(address && typeof address !== "string");
@@ -43,8 +54,12 @@ test("M-26 HTTP: validated cart and reservations atomically create order, paymen
     const response = await fetch(`${origin}${path}`, { method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify(body) });
     return { status: response.status, data: await response.json() as HttpData };
   }
+  async function availability(variantId: string) {
+    const response = await fetch(`${origin}/api/checkout/availability?variant=${variantId}`);
+    return { status: response.status, data: await response.json() as HttpData };
+  }
   try {
-    for (const file of ["0010_inventory_reservations.sql", "0011_reservation_release.sql", "0012_buyer_cart.sql", "0013_cart_checkout.sql", "0014_checkout_idempotency.sql"]) {
+    for (const file of ["0010_inventory_reservations.sql", "0011_reservation_release.sql", "0012_buyer_cart.sql", "0013_cart_checkout.sql", "0014_checkout_idempotency.sql", "0015_order_cancellation.sql"]) {
       await db.execute(sql.raw(await readFile(new URL(`../drizzle/${file}`, import.meta.url), "utf8")));
     }
     const clerkIds = ["seller", "buyer-a", "buyer-b"].map(role => `m26-${role}-${tag}`);
@@ -103,7 +118,34 @@ test("M-26 HTTP: validated cart and reservations atomically create order, paymen
     assert.equal((await post(buyerAToken, "/api/cart", { variantId: variantIds[0], quantity: 2 })).status, 200);
     const reused = await post(buyerAToken, "/api/checkout/orders", { key: crypto.randomUUID(), reservationIds: [reservationIds[0]] });
     assert.equal(reused.status, 409); assert.equal((await db.select().from(commerceOrders)).length, 1); assert.equal((await db.select().from(paymentIntents)).length, 1); assert.equal((await db.select().from(outboxEvents)).length, 1);
-    console.log("M-26/M-27: invalid checkout rolled back; valid checkout atomically created one record set; same key replayed identical IDs without duplicates; changed payload and reservation reuse rejected.");
+
+    assert.equal((await availability(variantIds[0])).data.item?.available, 8);
+    assert.equal((await availability(variantIds[1])).data.item?.available, 9);
+    const cancelPath = `/api/checkout/orders/${order.id}/cancel`;
+    const deniedCancellation = await post(buyerBToken, cancelPath, {});
+    assert.equal(deniedCancellation.status, 404, "Another buyer cannot discover or cancel the order");
+    await db.update(commerceOrders).set({ status: "processing" }).where(eq(commerceOrders.id, order.id));
+    const invalidCancellation = await post(buyerAToken, cancelPath, {});
+    assert.equal(invalidCancellation.status, 409, "A non-cancellable state cannot transition to cancelled");
+    await db.update(commerceOrders).set({ status: "pending_payment" }).where(eq(commerceOrders.id, order.id));
+
+    const cancellation = await post(buyerAToken, cancelPath, {});
+    assert.equal(cancellation.status, 200); assert.ok(cancellation.data.cancellation);
+    assert.equal(cancellation.data.cancellation.status, "cancelled"); assert.equal(cancellation.data.cancellation.releasedQuantity, 3);
+    assert.equal((await availability(variantIds[0])).data.item?.available, 10);
+    assert.equal((await availability(variantIds[1])).data.item?.available, 10);
+    const [cancelledOrder] = await db.select().from(commerceOrders).where(eq(commerceOrders.id, order.id));
+    const [cancelledIntent] = await db.select().from(paymentIntents).where(eq(paymentIntents.orderId, order.id));
+    const released = await db.select().from(inventoryReservations).where(inArray(inventoryReservations.id, reservationIds));
+    const events = await db.select().from(outboxEvents).where(eq(outboxEvents.aggregateId, order.id));
+    assert.equal(cancelledOrder.status, "cancelled"); assert.ok(cancelledOrder.cancelledAt); assert.equal(cancelledIntent.status, "cancelled");
+    assert.ok(released.every(row => row.releaseReason === "order_cancelled" && row.releasedAt));
+    assert.deepEqual(events.map(row => row.eventType).sort(), ["order.cancelled", "order.created"]);
+    const cancellationReplay = await post(buyerAToken, cancelPath, {});
+    assert.equal(cancellationReplay.status, 200);
+    assert.deepEqual(cancellationReplay.data.cancellation, { ...cancellation.data.cancellation, replayed: true });
+    assert.equal((await db.select().from(outboxEvents).where(eq(outboxEvents.aggregateId, order.id))).length, 2, "Retry creates no duplicate cancellation event");
+    console.log("M-26/M-27/M-29: checkout atomicity/idempotency passed; stranger and invalid-state cancellation were rejected; owner cancellation restored 8→10 and 9→10 availability exactly once.");
   } finally {
     await db.delete(outboxEvents).where(eq(outboxEvents.aggregateType, "order"));
     await db.delete(paymentIntents).where(inArray(paymentIntents.orderId, (await db.select({ id: commerceOrders.id }).from(commerceOrders).where(eq(commerceOrders.buyerId, userIds[1] ?? -1))).map(row => row.id)));

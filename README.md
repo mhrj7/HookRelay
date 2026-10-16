@@ -373,6 +373,32 @@ docker compose exec -T app sh -c 'RUN_CART_CHECKOUT_INTEGRATION=1 npx tsx --test
 node --env-file=.env.local scripts/migrate-checkout-idempotency.mjs
 ```
 
+### M‑29: Authorized cancellation with reservation restoration
+
+An unpaid buyer order can move from `pending_payment` to `cancelled` through one PostgreSQL transaction. The transaction locks the order and payment intent, releases every still-active reservation, cancels the internal payment intent, timestamps the order and writes one pending `order.cancelled` outbox event.
+
+```mermaid
+stateDiagram-v2
+  [*] --> PendingPayment: atomic checkout
+  PendingPayment --> Cancelled: owning buyer cancels
+  PendingPayment --> Paid: later payment milestone
+  Paid --> [*]: cancellation rejected
+  Cancelled --> Cancelled: idempotent retry
+```
+
+- Authorization is owner-only. A different buyer receives `404`, preventing both cancellation and order-ID disclosure.
+- Only `pending_payment` with an internal payment intent still in `requires_payment_method` is cancellable. Any other order/payment state returns `409` without changing inventory.
+- Cancellation retains reservation/allocation records for audit, marking active reservations `order_cancelled`. Availability immediately stops counting those holds; physical warehouse quantity is not incorrectly incremented.
+- The transition, payment-intent change, reservation releases and outbox event are atomic. A retry returns the original timestamp/event/result and creates no duplicate event.
+- Local real HTTP/PostgreSQL evidence on 16 October 2026: a stranger was rejected; a forced non-cancellable state was rejected; the owner cancelled an order holding 2 and 1 units; availability restored from 8→10 and 9→10; both reservation reasons, order/payment states and the single cancellation event were verified; retry changed no counts.
+- Scope: this is pre-payment cancellation only. Paid-order cancellation, refunds, seller cancellation and external payment-provider actions remain later milestones.
+
+```bash
+# Covered by the cart-checkout integration suite; local database only
+docker compose exec -T app sh -c 'RUN_CART_CHECKOUT_INTEGRATION=1 npx tsx --test tests/cart-checkout.integration.test.ts'
+node --env-file=.env.local scripts/migrate-order-cancellation.mjs
+```
+
 ## Resume-safe project description
 
 Use this now:
