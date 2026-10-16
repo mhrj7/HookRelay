@@ -263,6 +263,25 @@ export const refunds = pgTable("refunds", {
   check("refunds_amount_check", sql`${t.amount} > 0`),
 ]);
 
+export const disputes = pgTable("disputes", {
+  id: text("id").primaryKey(),
+  orderId: text("order_id").notNull().references(() => commerceOrders.id, { onDelete: "restrict" }),
+  openedBy: integer("opened_by").notNull().references(() => users.id, { onDelete: "restrict" }),
+  status: text("status").notNull().default("open"),
+  reason: text("reason").notNull(),
+  resolution: text("resolution"),
+  resolvedBy: integer("resolved_by").references(() => users.id, { onDelete: "restrict" }),
+  resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`clock_timestamp()`),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`clock_timestamp()`),
+}, t => [
+  uniqueIndex("disputes_order_id_key").on(t.orderId),
+  index("idx_disputes_status_updated").on(t.status, t.updatedAt),
+  check("disputes_status_check", sql`${t.status} IN ('open', 'under_review', 'resolved', 'rejected')`),
+  check("disputes_reason_check", sql`length(trim(${t.reason})) BETWEEN 5 AND 500`),
+  check("disputes_resolution_check", sql`(${t.status} IN ('open', 'under_review') AND ${t.resolution} IS NULL AND ${t.resolvedBy} IS NULL AND ${t.resolvedAt} IS NULL) OR (${t.status} IN ('resolved', 'rejected') AND length(trim(${t.resolution})) BETWEEN 5 AND 1000 AND ${t.resolvedBy} IS NOT NULL AND ${t.resolvedAt} IS NOT NULL)`),
+]);
+
 export const refundAudits = pgTable("refund_audits", {
   id: text("id").primaryKey(),
   refundId: text("refund_id").notNull().references(() => refunds.id, { onDelete: "restrict" }),
