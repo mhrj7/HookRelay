@@ -13,6 +13,7 @@ import { POST as checkoutPost } from "../app/api/checkout/orders/route";
 import { POST as cancellationPost } from "../app/api/checkout/orders/[id]/cancel/route";
 import { GET as availabilityGet } from "../app/api/checkout/availability/route";
 import { POST as refundPost } from "../app/api/checkout/orders/[id]/refunds/route";
+import { GET as commissionGet } from "../app/api/admin/commissions/route";
 
 type HttpData = {
   error?: string;
@@ -63,7 +64,7 @@ test("M-26/M-27/M-29/M-30 HTTP: checkout, cancellation, and authorized refund wo
     return { status: response.status, data: await response.json() as HttpData };
   }
   try {
-    for (const file of ["0010_inventory_reservations.sql", "0011_reservation_release.sql", "0012_buyer_cart.sql", "0013_cart_checkout.sql", "0014_checkout_idempotency.sql", "0015_order_cancellation.sql", "0016_refund_workflow.sql"]) {
+    for (const file of ["0010_inventory_reservations.sql", "0011_reservation_release.sql", "0012_buyer_cart.sql", "0013_cart_checkout.sql", "0014_checkout_idempotency.sql", "0015_order_cancellation.sql", "0016_refund_workflow.sql", "0017_notifications.sql"]) {
       await db.execute(sql.raw(await readFile(new URL(`../drizzle/${file}`, import.meta.url), "utf8")));
     }
     const clerkIds = ["seller", "buyer-a", "buyer-b", "admin"].map(role => `m26-${role}-${tag}`);
@@ -161,6 +162,14 @@ test("M-26/M-27/M-29/M-30 HTTP: checkout, cancellation, and authorized refund wo
     assert.equal(invalidStateRefund.status, 409); assert.match(invalidStateRefund.data.error ?? "", /paid/i);
     await db.update(commerceOrders).set({ status: "paid" }).where(eq(commerceOrders.id, refundableCheckout.data.order.orderId));
     await db.update(paymentIntents).set({ status: "succeeded" }).where(eq(paymentIntents.id, refundableCheckout.data.order.paymentIntentId));
+    const commissionRequest = (token: string) => new Request(`${origin}/api/admin/commissions`, { headers: { Authorization: `Bearer ${token}` } });
+    assert.equal((await commissionGet(commissionRequest(buyerAToken))).status, 403);
+    const paidReport = await commissionGet(commissionRequest(adminToken));
+    assert.equal(paidReport.status, 200);
+    const paidData = await paidReport.json();
+    const paidLine = paidData.items.find((item: { orderId: string }) => item.orderId === refundableCheckout.data.order!.orderId);
+    assert.equal(paidLine.variantId, variantIds[0]);
+    assert.equal(paidLine.netCommissionPaise, 625);
     const refundKey = crypto.randomUUID();
     const deniedRefund = await post(buyerAToken, refundPath, { key: refundKey, reason: "Customer returned item" });
     assert.equal(deniedRefund.status, 403, "A buyer cannot issue their own refund");
@@ -173,6 +182,13 @@ test("M-26/M-27/M-29/M-30 HTTP: checkout, cancellation, and authorized refund wo
     const [refundedOrder] = await db.select().from(commerceOrders).where(eq(commerceOrders.id, refundableCheckout.data.order.orderId));
     const [refundedIntent] = await db.select().from(paymentIntents).where(eq(paymentIntents.id, refundableCheckout.data.order.paymentIntentId));
     assert.equal(storedRefund.status, "succeeded"); assert.equal(storedRefund.providerRefundId, refund.data.refund.providerRefundId); assert.ok(storedRefund.completedAt);
+    const refundedReport = await commissionGet(commissionRequest(adminToken));
+    assert.equal(refundedReport.status, 200);
+    const refundedData = await refundedReport.json();
+    const refundedLine = refundedData.items.find((item: { orderId: string }) => item.orderId === refundableCheckout.data.order!.orderId);
+    assert.equal(refundedLine.refundId, storedRefund.id);
+    assert.equal(refundedLine.reversalPaise, 625);
+    assert.equal(refundedLine.netCommissionPaise, 0);
     assert.deepEqual(JSON.parse(storedRefund.providerResponse ?? "{}"), { provider: "internal_test", action: "refund", amount: 125, currency: "INR", idempotencyKey: refundKey });
     assert.deepEqual(storedAudits.map(row => row.eventType).sort(), ["refund.requested", "refund.succeeded"]);
     assert.equal(refundedOrder.status, "refunded"); assert.equal(refundedIntent.status, "refunded");
