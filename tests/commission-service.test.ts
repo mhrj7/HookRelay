@@ -1,8 +1,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { commissionForItem } from '../lib/commission-service';
+import { commissionForItem, commissionReport } from '../lib/commission-service';
 
-const source = { orderId: 'order', variantId: 'variant', storeId: 'store', quantity: 1, lineTotal: 29999, orderTotal: 29999, orderStatus: 'paid', refundId: null, refundStatus: null, refundAmount: null };
+const source = { orderId: 'order', variantId: 'variant', storeId: 'store', quantity: 1, lineTotal: 29999, orderTotal: 29999, orderStatus: 'paid', commissionRateBps: 500, refundId: null, refundStatus: null, refundAmount: null };
 describe('item commissions', () => {
   it('calculates exactly in paise and ignores unsuccessful refunds', () => {
     assert.equal(commissionForItem(source).netCommissionPaise, 149995);
@@ -17,5 +17,21 @@ describe('item commissions', () => {
   it('fails closed for partial or inconsistent refund data', () => {
     assert.throws(() => commissionForItem({ ...source, orderStatus: 'refunded', refundId: 'refund', refundStatus: 'succeeded', refundAmount: 100 }));
     assert.throws(() => commissionForItem({ ...source, orderStatus: 'refunded' }));
+    assert.throws(() => commissionForItem({ ...source, commissionRateBps: null }));
+  });
+  it('uses the historical item rate and rounds sub-paise amounts', () => {
+    assert.equal(commissionForItem({ ...source, lineTotal: 1, orderTotal: 1, commissionRateBps: 125 }).netCommissionPaise, 1);
+    assert.equal(commissionForItem({ ...source, commissionRateBps: 750 }).netCommissionPaise, 224993);
+  });
+  it('reconciles all items in a multi-item order and reverses a full refund', () => {
+    const first = { ...source, lineTotal: 100, orderTotal: 300, orderStatus: 'refunded', refundId: 'refund', refundStatus: 'succeeded', refundAmount: 300 };
+    const second = { ...first, variantId: 'variant-2', lineTotal: 200 };
+    const report = commissionReport([first, second]);
+    assert.equal(report.totals.grossCommissionPaise, 1500);
+    assert.equal(report.totals.reversalPaise, 1500);
+    assert.equal(report.totals.netCommissionPaise, 0);
+    assert.throws(() => commissionReport([first]));
+    assert.throws(() => commissionReport([first, first]));
+    assert.throws(() => commissionReport([first, { ...second, refundAmount: 200 }]));
   });
 });

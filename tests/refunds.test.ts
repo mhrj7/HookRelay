@@ -10,6 +10,6 @@ test("M-30 refund input requires an idempotency key and bounded reason", () => {
 
 test("M-30 internal payment provider refund is deterministic for the same idempotency key", async () => {
   const provider = new InternalTestPaymentProvider();
-  const request = { paymentIntentId: "pi-1", amount: 450, currency: "INR", idempotencyKey: "refund-key-00001", reason: "Customer returned item" };
+  const request = { providerPaymentId: "pay-1", amount: 450, currency: "INR", idempotencyKey: "refund-key-00001", reason: "Customer returned item" };
   assert.deepEqual(await provider.refund(request), await provider.refund(request));
 });

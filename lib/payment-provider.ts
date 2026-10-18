@@ -23,13 +23,15 @@ export type PaymentVerificationRequest = {
   signature: string;
 };
 
+export type CapturedPaymentVerificationRequest = PaymentVerificationRequest & { amount: number; currency: string };
+
 export type PaymentVerificationResult = {
   verified: boolean;
   raw: Record<string, unknown>;
 };
 
 export type RefundRequest = {
-  paymentIntentId: string;
+  providerPaymentId: string;
   amount: number;
   currency: string;
   idempotencyKey: string;
@@ -46,6 +48,7 @@ export interface PaymentProvider {
   readonly name: "internal_test" | "razorpay_test";
   createCheckout(request: PaymentCheckoutRequest): Promise<PaymentCheckoutResult>;
   verifyPayment(request: PaymentVerificationRequest): Promise<PaymentVerificationResult>;
+  verifyCapturedPayment(request: CapturedPaymentVerificationRequest): Promise<PaymentVerificationResult>;
   refund(request: RefundRequest): Promise<RefundResult>;
 }
 
@@ -71,8 +74,12 @@ export class InternalTestPaymentProvider implements PaymentProvider {
     return { verified, raw: { provider: this.name, action: "verify_payment", verified } };
   }
 
+  async verifyCapturedPayment(request: CapturedPaymentVerificationRequest): Promise<PaymentVerificationResult> {
+    return this.verifyPayment(request);
+  }
+
   async refund(request: RefundRequest): Promise<RefundResult> {
-    const digest = createHash("sha256").update(`${request.paymentIntentId}:${request.idempotencyKey}`).digest("hex").slice(0, 24);
+    const digest = createHash("sha256").update(`${request.providerPaymentId}:${request.idempotencyKey}`).digest("hex").slice(0, 24);
     return {
       providerRefundId: `rf_test_${digest}`,
       status: "succeeded",
@@ -106,12 +113,12 @@ export class RazorpayTestPaymentProvider implements PaymentProvider {
     this.fetcher = config.fetcher ?? fetch;
   }
 
-  private async request(path: string, method: "POST", body: Record<string, unknown>) {
+  private async request(path: string, method: "GET" | "POST", body?: Record<string, unknown>) {
     const authorization = `Basic ${Buffer.from(`${this.config.keyId}:${this.config.keySecret}`).toString("base64")}`;
     const response = await this.fetcher(`https://api.razorpay.com/v1${path}`, {
       method,
       headers: { Authorization: authorization, "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      ...(body ? { body: JSON.stringify(body) } : {}),
     });
     const payload: unknown = await response.json().catch(() => ({}));
     if (!response.ok) throw razorpayError(path, response.status, payload);
@@ -135,9 +142,21 @@ export class RazorpayTestPaymentProvider implements PaymentProvider {
     return { verified, raw: { provider: this.name, action: "verify_payment", verified } };
   }
 
+  async verifyCapturedPayment(request: CapturedPaymentVerificationRequest): Promise<PaymentVerificationResult> {
+    if (!Number.isSafeInteger(request.amount) || !Number.isSafeInteger(request.amount * 100) || request.amount <= 0 || request.currency !== "INR" || !/^pay_[A-Za-z0-9_]+$/.test(request.providerPaymentId)) {
+      return { verified: false, raw: { provider: this.name, action: "verify_payment", verified: false } };
+    }
+    const signatureValid = await verifyRazorpaySignature(request.providerOrderId, request.providerPaymentId, request.signature, this.config.keySecret);
+    if (!signatureValid) return { verified: false, raw: { provider: this.name, action: "verify_payment", verified: false } };
+    const payment = await this.request(`/payments/${encodeURIComponent(request.providerPaymentId)}`, "GET") as Record<string, unknown>;
+    const verified = payment.id === request.providerPaymentId && payment.order_id === request.providerOrderId &&
+      payment.status === "captured" && payment.amount === request.amount * 100 && payment.currency === request.currency;
+    return { verified, raw: { provider: this.name, action: "verify_payment", verified, status: payment.status } };
+  }
+
   async refund(request: RefundRequest): Promise<RefundResult> {
     if (!Number.isInteger(request.amount) || request.amount <= 0 || request.currency !== "INR") throw new Error("Invalid Razorpay refund amount");
-    const payload = await this.request(`/payments/${encodeURIComponent(request.paymentIntentId)}/refund`, "POST", {
+    const payload = await this.request(`/payments/${encodeURIComponent(request.providerPaymentId)}/refund`, "POST", {
       amount: request.amount * 100,
       notes: { reason: request.reason, idempotency_key: request.idempotencyKey },
     }) as { id?: unknown; status?: unknown };

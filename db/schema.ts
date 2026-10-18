@@ -218,7 +218,8 @@ export const commerceOrderItems = pgTable("commerce_order_items", {
   quantity: integer("quantity").notNull(),
   unitPrice: integer("unit_price").notNull(),
   lineTotal: integer("line_total").notNull(),
-}, t => [primaryKey({ columns: [t.orderId, t.variantId] }), uniqueIndex("commerce_order_items_reservation_id_key").on(t.reservationId), check("commerce_order_items_quantity_check", sql`${t.quantity} BETWEEN 1 AND 20`), check("commerce_order_items_price_check", sql`${t.unitPrice} > 0 AND ${t.lineTotal} = ${t.unitPrice} * ${t.quantity}`)]);
+  commissionRateBps: integer("commission_rate_bps").default(500),
+}, t => [primaryKey({ columns: [t.orderId, t.variantId] }), uniqueIndex("commerce_order_items_reservation_id_key").on(t.reservationId), check("commerce_order_items_quantity_check", sql`${t.quantity} BETWEEN 1 AND 20`), check("commerce_order_items_price_check", sql`${t.unitPrice} > 0 AND ${t.lineTotal} = ${t.unitPrice} * ${t.quantity}`), check("commerce_order_items_commission_rate_check", sql`${t.commissionRateBps} BETWEEN 0 AND 10000`)]);
 
 export const paymentIntents = pgTable("payment_intents", {
   id: text("id").primaryKey(),
@@ -227,8 +228,12 @@ export const paymentIntents = pgTable("payment_intents", {
   status: text("status").notNull().default("requires_payment_method"),
   amount: integer("amount").notNull(),
   currency: text("currency").notNull().default("INR"),
+  providerOrderId: text("provider_order_id"),
+  providerPaymentId: text("provider_payment_id"),
+  providerResponse: text("provider_response"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`clock_timestamp()`),
-}, t => [uniqueIndex("payment_intents_order_id_key").on(t.orderId), check("payment_intents_amount_check", sql`${t.amount} > 0`)]);
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`clock_timestamp()`),
+}, t => [uniqueIndex("payment_intents_order_id_key").on(t.orderId), uniqueIndex("payment_intents_provider_order_id_key").on(t.providerOrderId), uniqueIndex("payment_intents_provider_payment_id_key").on(t.providerPaymentId), check("payment_intents_amount_check", sql`${t.amount} > 0`)]);
 
 export const outboxEvents = pgTable("outbox_events", {
   id: text("id").primaryKey(),

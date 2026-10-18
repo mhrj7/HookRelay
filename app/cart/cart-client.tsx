@@ -6,7 +6,10 @@ import { useCallback, useEffect, useState } from "react";
 
 type CartItem = { variantId: string; title: string; name: string; sku: string; slug: string; quantity: number; unitPrice: number; lineTotal: number; active: boolean };
 type Cart = { id: string | null; items: CartItem[]; total: number; itemCount: number };
-type CheckoutResponse = { error?: string; reservation?: { id: string }; reservationId?: string; order?: { orderId: string; paymentIntentId: string; total: number; currency: string } };
+type CheckoutResponse = { error?: string; reservation?: { id: string }; reservationId?: string; order?: { orderId: string; paymentIntentId: string; total: number; currency: string }; payment?: { providerOrderId: string; amount: number; currency: string; publicKeyId?: string; status: string } };
+type RazorpayResponse = { razorpay_payment_id: string; razorpay_order_id: string; razorpay_signature: string };
+
+declare global { interface Window { Razorpay?: new (options: Record<string, unknown>) => { open: () => void } } }
 
 export default function CartClient() {
   const { getToken, isLoaded, isSignedIn } = useAuth();
@@ -25,11 +28,22 @@ export default function CartClient() {
     return data.cart as Cart;
   }, [getToken]);
 
-  const post = useCallback(async (path: string, body: unknown) => {
+  const post = useCallback(async (path: string, body: unknown, method = "POST") => {
     const token = await getToken();
-    const response = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify(body) });
+    const response = await fetch(path, { method, headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify(body) });
     return { response, data: await response.json() as CheckoutResponse };
   }, [getToken]);
+
+  async function loadRazorpay() {
+    if (window.Razorpay) return true;
+    return new Promise<boolean>(resolve => {
+      const script = document.createElement("script");
+      script.src = "https://checkout.razorpay.com/v1/checkout.js";
+      script.onload = () => resolve(Boolean(window.Razorpay));
+      script.onerror = () => resolve(false);
+      document.body.appendChild(script);
+    });
+  }
 
   const load = useCallback(async () => {
     if (!isSignedIn) return;
@@ -85,8 +99,24 @@ export default function CartClient() {
       setNotice("Creating the order, payment intent, and event record…");
       const { response, data } = await post("/api/checkout/orders", { key: crypto.randomUUID(), reservationIds });
       if (!response.ok || !data.order) throw new Error(data.error ?? "Could not create the order.");
-      await load();
-      setNotice(`Order ${data.order.orderId} created for ₹${data.order.total.toLocaleString("en-IN")}. Payment intent ${data.order.paymentIntentId} is ready; no payment has been taken.`);
+      setNotice("Opening Razorpay test checkout…");
+      const started = await post(`/api/checkout/orders/${data.order.orderId}/payment`, {});
+      if (!started.response.ok || !started.data.payment?.publicKeyId || !started.data.payment.providerOrderId) throw new Error(started.data.error ?? "Could not start test payment.");
+      if (!await loadRazorpay() || !window.Razorpay) throw new Error("Could not load Razorpay test checkout.");
+      const payment = started.data.payment;
+      new window.Razorpay({
+        key: payment.publicKeyId, order_id: payment.providerOrderId, amount: payment.amount * 100,
+        currency: payment.currency, name: "VyapaarCart", description: `Test cart order ${data.order.orderId}`,
+        theme: { color: "#1f8a58" },
+        handler: async (result: RazorpayResponse) => {
+          setNotice("Verifying captured test payment and committing reserved stock…");
+          const verified = await post(`/api/checkout/orders/${data.order!.orderId}/payment`, { providerOrderId: result.razorpay_order_id, providerPaymentId: result.razorpay_payment_id, signature: result.razorpay_signature }, "PATCH");
+          if (!verified.response.ok) { setNotice(verified.data.error ?? "Payment could not be verified."); return; }
+          await load();
+          setNotice(`Test payment verified for order ${data.order!.orderId}. Reserved stock was committed and its commission is now reportable.`);
+        },
+        modal: { ondismiss: () => setNotice(`Order ${data.order!.orderId} remains pending payment. Its stock holds expire after 10 minutes.`) },
+      }).open();
     } catch (error) {
       setNotice(`${error instanceof Error ? error.message : "Checkout failed."} Any successful stock holds remain visible until their 10-minute expiry.`);
     } finally { setBusy(""); }

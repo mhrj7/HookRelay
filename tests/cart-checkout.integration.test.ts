@@ -13,23 +13,28 @@ import { POST as checkoutPost } from "../app/api/checkout/orders/route";
 import { POST as cancellationPost } from "../app/api/checkout/orders/[id]/cancel/route";
 import { GET as availabilityGet } from "../app/api/checkout/availability/route";
 import { POST as refundPost } from "../app/api/checkout/orders/[id]/refunds/route";
+import { POST as paymentPost, PATCH as paymentPatch } from "../app/api/checkout/orders/[id]/payment/route";
 import { GET as commissionGet } from "../app/api/admin/commissions/route";
+import { createInternalTestSignature } from "../lib/payment-provider";
 
 type HttpData = {
   error?: string;
   reservation?: { id: string };
   order?: { orderId: string; paymentIntentId: string; outboxEventId: string; status: string; total: number; currency: string; replayed?: boolean };
   cancellation?: { orderId: string; status: string; cancelledAt: string; outboxEventId: string; releasedQuantity: number; replayed: boolean };
-  refund?: { refundId: string; paymentIntentId: string; provider: string; providerRefundId: string; amount: number; currency: string; reason: string; status: string; completedAt: string; outboxEventId: string; replayed: boolean };
+  refund?: { refundId: string; paymentIntentId: string; providerPaymentId: string; provider: string; providerRefundId: string; amount: number; currency: string; reason: string; status: string; completedAt: string; outboxEventId: string; replayed: boolean };
   item?: { available: number };
+  payment?: { providerOrderId: string; paymentIntentId: string; status: string; replayed?: boolean };
 };
 
 test("M-26/M-27/M-29/M-30 HTTP: checkout, cancellation, and authorized refund workflows persist exact effects", {
-  skip: process.env.RUN_CART_CHECKOUT_INTEGRATION !== "1", timeout: 30000,
+  skip: process.env.RUN_CART_CHECKOUT_INTEGRATION !== "1", timeout: process.env.ALLOW_NEON_M42_INTEGRATION === "1" ? 120000 : 30000,
 }, async () => {
-  assert.match(process.env.DATABASE_URL ?? "", /@(db|localhost|127\.0\.0\.1)(:|\/)/);
+  if (process.env.ALLOW_NEON_M42_INTEGRATION !== "1") assert.match(process.env.DATABASE_URL ?? "", /@(db|localhost|127\.0\.0\.1)(:|\/)/);
   const previousSecret = process.env.JWT_AUTH_SECRET;
+  const previousPaymentProvider = process.env.COMMERCE_PAYMENT_PROVIDER;
   process.env.JWT_AUTH_SECRET = crypto.randomUUID() + crypto.randomUUID();
+  process.env.COMMERCE_PAYMENT_PROVIDER = "internal_test";
   const server = createServer(async (incoming, outgoing) => {
     try {
       const chunks: Buffer[] = []; for await (const chunk of incoming) chunks.push(Buffer.from(chunk));
@@ -39,11 +44,14 @@ test("M-26/M-27/M-29/M-30 HTTP: checkout, cancellation, and authorized refund wo
       const path = new URL(request.url).pathname;
       const cancelMatch = path.match(/^\/api\/checkout\/orders\/([^/]+)\/cancel$/);
       const refundMatch = path.match(/^\/api\/checkout\/orders\/([^/]+)\/refunds$/);
+      const paymentMatch = path.match(/^\/api\/checkout\/orders\/([^/]+)\/payment$/);
       const response = path === "/api/cart" ? await cartPost(request)
         : path === "/api/checkout/reservations" ? await reservationPost(request)
           : path === "/api/checkout/orders" ? await checkoutPost(request)
             : path === "/api/checkout/availability" ? await availabilityGet(request)
               : cancelMatch ? await cancellationPost(request, { params: Promise.resolve({ id: cancelMatch[1] }) })
+                : paymentMatch && request.method === "POST" ? await paymentPost(request, { params: Promise.resolve({ id: paymentMatch[1] }) })
+                  : paymentMatch && request.method === "PATCH" ? await paymentPatch(request, { params: Promise.resolve({ id: paymentMatch[1] }) })
                 : refundMatch ? await refundPost(request, { params: Promise.resolve({ id: refundMatch[1] }) })
                 : new Response(null, { status: 404 });
       outgoing.writeHead(response.status, Object.fromEntries(response.headers)); outgoing.end(await response.text());
@@ -63,9 +71,19 @@ test("M-26/M-27/M-29/M-30 HTTP: checkout, cancellation, and authorized refund wo
     const response = await fetch(`${origin}/api/checkout/availability?variant=${variantId}`);
     return { status: response.status, data: await response.json() as HttpData };
   }
+  async function fixtureCounts() {
+    const result = await db.execute(sql`SELECT
+      (SELECT count(*)::int FROM commerce_orders WHERE buyer_id = ${userIds[1] ?? -1}) AS orders,
+      (SELECT count(*)::int FROM payment_intents WHERE order_id IN (SELECT id FROM commerce_orders WHERE buyer_id = ${userIds[1] ?? -1})) AS intents,
+      (SELECT count(*)::int FROM outbox_events WHERE aggregate_type = 'order' AND aggregate_id IN (SELECT id FROM commerce_orders WHERE buyer_id = ${userIds[1] ?? -1})) AS events`);
+    const rows = (Array.isArray(result) ? result : result.rows) as Array<{ orders: number; intents: number; events: number }>;
+    return rows[0];
+  }
   try {
-    for (const file of ["0010_inventory_reservations.sql", "0011_reservation_release.sql", "0012_buyer_cart.sql", "0013_cart_checkout.sql", "0014_checkout_idempotency.sql", "0015_order_cancellation.sql", "0016_refund_workflow.sql", "0017_notifications.sql"]) {
-      await db.execute(sql.raw(await readFile(new URL(`../drizzle/${file}`, import.meta.url), "utf8")));
+    if (process.env.ALLOW_NEON_M42_INTEGRATION !== "1") {
+      for (const file of ["0010_inventory_reservations.sql", "0011_reservation_release.sql", "0012_buyer_cart.sql", "0013_cart_checkout.sql", "0014_checkout_idempotency.sql", "0015_order_cancellation.sql", "0016_refund_workflow.sql", "0017_notifications.sql", "0019_commission_rate_snapshot.sql", "0020_commerce_payment_capture.sql", "0021_refund_provider_payment.sql"]) {
+        await db.execute(sql.raw(await readFile(new URL(`../drizzle/${file}`, import.meta.url), "utf8")));
+      }
     }
     const clerkIds = ["seller", "buyer-a", "buyer-b", "admin"].map(role => `m26-${role}-${tag}`);
     for (let i = 0; i < clerkIds.length; i++) {
@@ -95,7 +113,7 @@ test("M-26/M-27/M-29/M-30 HTTP: checkout, cancellation, and authorized refund wo
     assert.equal((await post(buyerBToken, "/api/cart", { variantId: variantIds[0], quantity: 2 })).status, 200);
     const invalid = await post(buyerBToken, "/api/checkout/orders", { key: crypto.randomUUID(), reservationIds: [reservationIds[0]] });
     assert.equal(invalid.status, 409);
-    assert.equal((await db.select().from(commerceOrders)).length, 0); assert.equal((await db.select().from(paymentIntents)).length, 0); assert.equal((await db.select().from(outboxEvents)).length, 0);
+    assert.deepEqual(await fixtureCounts(), { orders: 0, intents: 0, events: 0 });
     assert.equal((await db.select().from(cartItems).innerJoin(carts, eq(cartItems.cartId, carts.id)).where(eq(carts.buyerId, userIds[2]))).length, 1, "Failed checkout leaves cart intact");
 
     const checkoutKey = crypto.randomUUID();
@@ -119,11 +137,11 @@ test("M-26/M-27/M-29/M-30 HTTP: checkout, cancellation, and authorized refund wo
 
     const changedPayload = await post(buyerAToken, "/api/checkout/orders", { key: checkoutKey, reservationIds: [reservationIds[0]] });
     assert.equal(changedPayload.status, 409); assert.match(changedPayload.data.error ?? "", /idempotency key/i);
-    assert.equal((await db.select().from(commerceOrders)).length, 1); assert.equal((await db.select().from(paymentIntents)).length, 1); assert.equal((await db.select().from(outboxEvents)).length, 1);
+    assert.deepEqual(await fixtureCounts(), { orders: 1, intents: 1, events: 1 });
 
     assert.equal((await post(buyerAToken, "/api/cart", { variantId: variantIds[0], quantity: 2 })).status, 200);
     const reused = await post(buyerAToken, "/api/checkout/orders", { key: crypto.randomUUID(), reservationIds: [reservationIds[0]] });
-    assert.equal(reused.status, 409); assert.equal((await db.select().from(commerceOrders)).length, 1); assert.equal((await db.select().from(paymentIntents)).length, 1); assert.equal((await db.select().from(outboxEvents)).length, 1);
+    assert.equal(reused.status, 409); assert.deepEqual(await fixtureCounts(), { orders: 1, intents: 1, events: 1 });
 
     assert.equal((await availability(variantIds[0])).data.item?.available, 8);
     assert.equal((await availability(variantIds[1])).data.item?.available, 9);
@@ -160,8 +178,16 @@ test("M-26/M-27/M-29/M-30 HTTP: checkout, cancellation, and authorized refund wo
     const refundPath = `/api/checkout/orders/${refundableCheckout.data.order.orderId}/refunds`;
     const invalidStateRefund = await post(adminToken, refundPath, { key: crypto.randomUUID(), reason: "Requested before payment" });
     assert.equal(invalidStateRefund.status, 409); assert.match(invalidStateRefund.data.error ?? "", /paid/i);
-    await db.update(commerceOrders).set({ status: "paid" }).where(eq(commerceOrders.id, refundableCheckout.data.order.orderId));
-    await db.update(paymentIntents).set({ status: "succeeded" }).where(eq(paymentIntents.id, refundableCheckout.data.order.paymentIntentId));
+    const paymentPath = `/api/checkout/orders/${refundableCheckout.data.order.orderId}/payment`;
+    const payment = await post(buyerAToken, paymentPath, {});
+    assert.equal(payment.status, 200); assert.ok(payment.data.payment?.providerOrderId);
+    const providerPaymentId = `pay_test_${crypto.randomUUID().replaceAll("-", "")}`;
+    const captured = await fetch(`${origin}${paymentPath}`, { method: "PATCH", headers: { Authorization: `Bearer ${buyerAToken}`, "Content-Type": "application/json" }, body: JSON.stringify({ providerOrderId: payment.data.payment.providerOrderId, providerPaymentId, signature: createInternalTestSignature(payment.data.payment.providerOrderId, providerPaymentId) }) });
+    const capturedData = await captured.json() as HttpData;
+    assert.equal(captured.status, 200); assert.equal(capturedData.payment?.status, "paid");
+    const [paidIntent] = await db.select().from(paymentIntents).where(eq(paymentIntents.id, refundableCheckout.data.order.paymentIntentId));
+    assert.equal(paidIntent.providerPaymentId, providerPaymentId); assert.equal(paidIntent.status, "succeeded");
+    assert.equal((await availability(variantIds[0])).data.item?.available, 9, "Captured payment consumes one physical unit");
     const commissionRequest = (token: string) => new Request(`${origin}/api/admin/commissions`, { headers: { Authorization: `Bearer ${token}` } });
     assert.equal((await commissionGet(commissionRequest(buyerAToken))).status, 403);
     const paidReport = await commissionGet(commissionRequest(adminToken));
@@ -169,7 +195,9 @@ test("M-26/M-27/M-29/M-30 HTTP: checkout, cancellation, and authorized refund wo
     const paidData = await paidReport.json();
     const paidLine = paidData.items.find((item: { orderId: string }) => item.orderId === refundableCheckout.data.order!.orderId);
     assert.equal(paidLine.variantId, variantIds[0]);
+    assert.equal(paidLine.commissionRateBps, 500);
     assert.equal(paidLine.netCommissionPaise, 625);
+    await assert.rejects(db.update(commerceOrderItems).set({ commissionRateBps: 750 }).where(eq(commerceOrderItems.orderId, refundableCheckout.data.order.orderId)));
     const refundKey = crypto.randomUUID();
     const deniedRefund = await post(buyerAToken, refundPath, { key: refundKey, reason: "Customer returned item" });
     assert.equal(deniedRefund.status, 403, "A buyer cannot issue their own refund");
@@ -211,7 +239,10 @@ test("M-26/M-27/M-29/M-30 HTTP: checkout, cancellation, and authorized refund wo
     await db.delete(warehouseStock).where(inArray(warehouseStock.variantId, variantIds));
     await db.delete(warehouses).where(eq(warehouses.id, warehouseId)); await db.delete(products).where(eq(products.id, productId));
     await db.delete(stores).where(eq(stores.id, storeId)); await db.delete(categories).where(eq(categories.id, tag)); if (userIds.length) await db.delete(users).where(inArray(users.id, userIds));
-    await (db as ReturnType<typeof drizzlePostgres>).$client.end(); server.closeAllConnections(); await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    const databaseClient = (db as unknown as { $client?: { end?: () => Promise<void> } }).$client;
+    if (typeof databaseClient?.end === "function") await databaseClient.end();
+    server.closeAllConnections(); await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
     if (previousSecret === undefined) delete process.env.JWT_AUTH_SECRET; else process.env.JWT_AUTH_SECRET = previousSecret;
+    if (previousPaymentProvider === undefined) delete process.env.COMMERCE_PAYMENT_PROVIDER; else process.env.COMMERCE_PAYMENT_PROVIDER = previousPaymentProvider;
   }
 });
