@@ -508,6 +508,8 @@ flowchart LR
 
 ### M‑42: Traceable platform commissions
 
+**Status: Complete — verified locally, on an isolated Neon branch, and in the production deployment.**
+
 Every checkout item stores the platform commission rate that applied when the order was created. Commission reporting therefore reads immutable item snapshots instead of today's mutable configuration, and a refund contributes an equal negative reversal tied to the same order and item records.
 
 ```mermaid
