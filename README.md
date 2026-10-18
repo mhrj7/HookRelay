@@ -170,9 +170,8 @@ No performance or load-test figures are claimed because they have not yet been m
 
 This repository **does not yet claim** to be the complete multi-vendor commerce platform described in the original roadmap. In particular, it does not yet include:
 
-- Carts, multi-SKU checkout, or finalization of SKU reservations into paid orders
-- Disputes, refunds, or commission accounting
-- Redis rate limiting, Kafka/Redpanda, transactional outbox, or OpenTelemetry/Prometheus/Grafana
+- Live-money checkout, settlement, or courier booking; payment and refund verification remains in provider test mode
+- Redis rate limiting, Kafka/Redpanda, or OpenTelemetry/Prometheus/Grafana
 - Webhook endpoints, HMAC-signed webhook deliveries, retry queues, delivery console, secret rotation, replay, or endpoint-level rate limits
 - FastAPI, Alembic, pytest, Playwright, k6, or GitHub Actions CI
 - A live courier booking; a Shiprocket adapter is implemented and the local simulator remains the safe default
@@ -507,13 +506,34 @@ flowchart LR
 - The email adapter posts to Resend with a provider idempotency key. When no verified Resend sender is configured, the email record is explicitly marked `skipped`; it is not falsely reported as delivered.
 - Tests prove that a duplicate order event creates one in-app delivery and sends one email, uses a provider idempotency key, and does not expose an API key in failure text.
 
+### M‑42: Traceable platform commissions
+
+Every checkout item stores the platform commission rate that applied when the order was created. Commission reporting therefore reads immutable item snapshots instead of today's mutable configuration, and a refund contributes an equal negative reversal tied to the same order and item records.
+
+```mermaid
+flowchart LR
+  C[Cart checkout] --> I[Immutable order-item rate snapshot]
+  I --> P[Verified provider payment]
+  P --> E[Earned commission ledger]
+  P --> R[Provider-linked refund]
+  R --> V[Commission reversal]
+  E --> A[Admin commission report]
+  V --> A
+```
+
+- `order_items.commission_rate_bps` is set during checkout and protected by a database trigger from later modification. Historical settled rows without a defensible rate remain `NULL` and make reporting fail closed rather than fabricate revenue.
+- Payment verification checks the provider payment's status, amount, and currency before one database transaction commits reservations, marks the order paid, records the provider identifiers, and creates the `order.paid` outbox event.
+- Refunds reference the real provider payment ID. A completed refund produces a negative commission entry, so gross commission, reversals, and net commission reconcile to order-item values.
+- The admin report uses the stored rate on each item and returns a conflict for an inconsistent settled order instead of silently omitting it.
+- Verified against a disposable Neon branch and local PostgreSQL through checkout → payment capture → stock commit → commission report → provider-linked refund → commission reversal. The same production migration was then applied and schema-verified on the production Neon branch.
+
 ## Resume-safe project description
 
 Use this now:
 
-> Built and deployed VyapaarCart, a full-stack local marketplace using Next.js, TypeScript, Neon Postgres, Drizzle, Clerk, S3-compatible storage, and Razorpay test mode. Implemented authenticated listing management, public seller stores, categorized products and SKU variants, ordered product galleries, buyer–seller messaging, payment signature verification, and a persisted simulated shipment-tracking workflow.
+> Built and deployed VyapaarCart, a full-stack local marketplace using Next.js, TypeScript, Neon Postgres, Drizzle, Clerk, S3-compatible storage, and Razorpay test mode. Implemented authenticated seller stores, SKU inventory and expiring reservations, idempotent multi-item checkout, verified test payments and refunds, immutable per-item commission snapshots with refund reversals, buyer–seller messaging, and persisted simulated shipment tracking.
 
-Do **not** yet claim Kafka, Redis, FastAPI, paid SKU checkout, real courier integration, webhooks, or measured scale. SKU holds have local concurrency tests, exact five-round final-unit oversell proof, an idempotent payment-failure release transition, and a verified live buyer hold/expiry flow. Add new claims only after they are genuinely implemented and tested.
+Do **not** claim live-money settlement, Kafka, Redis, FastAPI, real courier booking, webhooks, or measured scale. The checkout, payment, refund, and commission lifecycle is verified in provider test mode. Add new claims only after they are genuinely implemented and tested.
 
 ## Licence
 
