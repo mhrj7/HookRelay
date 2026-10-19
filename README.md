@@ -337,7 +337,7 @@ sequenceDiagram
 
 - Each order item records the exact SKU, reservation, seller, store, quantity, unit price and line total used at checkout. A reservation is unique across order items, preventing reuse.
 - The server creates an `internal_test` payment intent in `requires_payment_method`; the browser cannot supply its ID, amount, currency, order ID or event payload.
-- The transaction writes one pending `order.created` outbox record alongside the order and payment intent. Event publishing is a later milestone; this milestone proves atomic outbox creation only.
+- The transaction writes one pending `order.created` outbox record alongside the order and payment intent. M‑44 adds deferred database guards that enforce this relationship at commit for checkout and subsequent order/payment transitions. Event publishing remains a later milestone.
 - Local HTTP/SQL evidence on 15 October 2026: an invalid cross-buyer reservation produced zero orders, payment intents and outbox events and left the cart intact. A valid two-SKU cart (2 × ₹125 plus 1 × ₹200) created exactly one ₹450 order, two matching immutable items, one ₹450 payment intent and one pending outbox event, then cleared only that buyer's cart. Reusing a consumed reservation was rejected and all record counts remained one.
 - Scope: no payment was captured, no external provider intent was created, inventory was not deducted, and the outbox event was not published. Those remain separate later milestones.
 
@@ -549,6 +549,40 @@ flowchart LR
 - A database trigger rejects updates and deletes on `audit_events`; source IDs have a unique constraint so retries cannot duplicate an event.
 - `GET /api/admin/audit-logs` and `/admin/audit-logs` require an administrator and expose the actor, target, before/after state, metadata, and timestamp for investigation.
 - Verification covers all four required change categories, add/change/remove role transitions, duplicate-safe source identity, admin retrieval, and rejected tampering on disposable PostgreSQL and an isolated Neon branch. The migration is also schema-verified on production Neon.
+
+### M‑44: Transactional outbox
+
+**Status: Complete — verified against production-like Neon data and through the full checkout/payment/cancellation/refund integration flow.**
+
+Order and payment domain changes cannot commit without their matching outbox events, and an order event cannot commit without the matching order/payment/refund state. PostgreSQL deferred constraint triggers check the complete transaction state at commit, allowing each existing domain function to write its related rows together while rejecting partial commits.
+
+```mermaid
+sequenceDiagram
+  participant A as Application
+  participant T as PostgreSQL transaction
+  participant D as Order/payment/refund state
+  participant O as Outbox
+  A->>T: Checkout, capture, cancel or refund
+  T->>D: Persist domain changes
+  T->>O: Persist matching domain event
+  T->>T: Deferred consistency checks at COMMIT
+  alt both sides match
+    T-->>A: Commit
+  else either side is missing or inconsistent
+    T-->>A: Reject and roll back
+  end
+```
+
+- The database requires every order to have a payment intent and `order.created` event. Paid, cancelled and refunded states require `order.paid`, `order.cancelled` and `order.refunded` respectively, with matching payment/refund state.
+- Guards run after changes to orders, payment intents, refunds and outbox rows. They also reject orphan events and deletion or reassignment that would break an existing relationship.
+- Migration preflight checked the production dataset before enforcement: all three existing orders had matching events, with no missing terminal events or orphan order events.
+- Integration evidence on a disposable child branch: order + payment rows without `order.created` were rolled back; an `order.created` event without an order was rejected; checkout, payment capture, cancellation, refund and idempotent retries all passed with one matching event per transition.
+- Outbox publishing/dispatch is not included in M‑44; delivery to a broker or consumer is a separate milestone.
+
+```bash
+node --env-file=.env.local scripts/migrate-m44-transactional-outbox.mjs
+RUN_CART_CHECKOUT_INTEGRATION=1 npx tsx --test tests/cart-checkout.integration.test.ts
+```
 
 ## Resume-safe project description
 

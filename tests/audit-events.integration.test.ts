@@ -3,8 +3,9 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { drizzle as drizzlePostgres } from "drizzle-orm/postgres-js";
+import postgres from "postgres";
 import { getDb } from "../db";
-import { auditEvents, categories, commerceOrders, inventoryAudits, organizationMembers, organizations, paymentIntents, products, productVariants, refundAudits, refunds, stores, users, warehouses } from "../db/schema";
+import { auditEvents, categories, commerceOrders, inventoryAudits, organizationMembers, organizations, outboxEvents, paymentIntents, products, productVariants, refundAudits, refunds, stores, users, warehouses } from "../db/schema";
 import { decideSellerApproval, latestAuditEvents, removeOrganizationMemberRole, saveOrganizationMemberRole } from "../lib/audit-service";
 import type { Actor } from "../lib/authorization";
 
@@ -15,6 +16,8 @@ test("M-43 SQL: sensitive changes produce immutable actor/target/before/after/ti
   const isNeon = process.env.ALLOW_NEON_M43_INTEGRATION === "1";
   if (!isNeon) assert.match(process.env.DATABASE_URL ?? "", /@(db|localhost|127\.0\.0\.1)(:|\/)/);
   const db = getDb();
+  const direct = postgres(process.env.DATABASE_URL!, { max: 1 });
+  t.after(async () => { await direct.end(); });
   if (!isNeon) t.after(async () => { await (db as ReturnType<typeof drizzlePostgres>).$client.end(); });
   if (!isNeon) {
   await db.execute(sql.raw(await readFile(new URL("../drizzle/0000_glamorous_white_queen.sql", import.meta.url), "utf8")));
@@ -22,7 +25,7 @@ test("M-43 SQL: sensitive changes produce immutable actor/target/before/after/ti
     ALTER TABLE users ADD COLUMN role text NOT NULL DEFAULT 'buyer';
     ALTER TABLE users ADD COLUMN staff_for_seller_id integer;
   `));
-  for (const file of ["0001_seller_approval.sql", "0002_public_stores.sql", "0003_jwt_refresh_tokens.sql", "0004_products_categories.sql", "0005_product_variants.sql", "0006_product_images.sql", "0008_warehouses.sql", "0009_inventory_audits.sql", "0010_inventory_reservations.sql", "0011_reservation_release.sql", "0012_buyer_cart.sql", "0013_cart_checkout.sql", "0014_checkout_idempotency.sql", "0015_order_cancellation.sql", "0016_refund_workflow.sql", "0017_notifications.sql", "0018_disputes.sql", "0019_commission_rate_snapshot.sql", "0020_commerce_payment_capture.sql", "0021_refund_provider_payment.sql"]) {
+  for (const file of ["0001_seller_approval.sql", "0002_public_stores.sql", "0003_jwt_refresh_tokens.sql", "0004_products_categories.sql", "0005_product_variants.sql", "0006_product_images.sql", "0008_warehouses.sql", "0009_inventory_audits.sql", "0010_inventory_reservations.sql", "0011_reservation_release.sql", "0012_buyer_cart.sql", "0013_cart_checkout.sql", "0014_checkout_idempotency.sql", "0015_order_cancellation.sql", "0016_refund_workflow.sql", "0017_notifications.sql", "0018_disputes.sql", "0019_commission_rate_snapshot.sql", "0020_commerce_payment_capture.sql", "0021_refund_provider_payment.sql", "0023_transactional_outbox_guards.sql"]) {
     await db.execute(sql.raw(await readFile(new URL(`../drizzle/${file}`, import.meta.url), "utf8")));
   }
   await db.execute(sql.raw(`
@@ -80,9 +83,15 @@ test("M-43 SQL: sensitive changes produce immutable actor/target/before/after/ti
   assert.deepEqual(inventoryEvent.afterSummary, { quantity: 7, version: 3 });
 
   const orderId = crypto.randomUUID(); const paymentId = crypto.randomUUID(); const refundId = crypto.randomUUID();
-  await db.insert(commerceOrders).values({ id: orderId, buyerId: member.id, idempotencyKey: `${tag}-order`, requestFingerprint: tag, status: "paid", total: 100 });
-  await db.insert(paymentIntents).values({ id: paymentId, orderId, provider: "internal_test", status: "succeeded", amount: 100 });
-  await db.insert(refunds).values({ id: refundId, orderId, paymentIntentId: paymentId, requestedBy: admin.id, idempotencyKey: `${tag}-refund`, provider: "internal_test", providerRefundId: `${tag}-provider-refund`, amount: 100, currency: "INR", reason: "Audit test", status: "succeeded" });
+  await direct.begin(async tx => {
+    await tx`INSERT INTO commerce_orders(id, buyer_id, idempotency_key, request_fingerprint, status, total) VALUES (${orderId}, ${member.id}, ${`${tag}-order`}, ${tag}, 'refunded', 100)`;
+    await tx`INSERT INTO payment_intents(id, order_id, provider, status, amount) VALUES (${paymentId}, ${orderId}, 'internal_test', 'refunded', 100)`;
+    await tx`INSERT INTO refunds(id, order_id, payment_intent_id, requested_by, idempotency_key, provider, provider_refund_id, amount, currency, reason, status) VALUES (${refundId}, ${orderId}, ${paymentId}, ${admin.id}, ${`${tag}-refund`}, 'internal_test', ${`${tag}-provider-refund`}, 100, 'INR', 'Audit test', 'succeeded')`;
+    await tx`INSERT INTO outbox_events(id, aggregate_type, aggregate_id, event_type, payload) VALUES
+      (${crypto.randomUUID()}, 'order', ${orderId}, 'order.created', ${JSON.stringify({ orderId })}),
+      (${crypto.randomUUID()}, 'order', ${orderId}, 'order.paid', ${JSON.stringify({ orderId })}),
+      (${crypto.randomUUID()}, 'order', ${orderId}, 'order.refunded', ${JSON.stringify({ orderId, refundId })})`;
+  });
   const refundAuditId = crypto.randomUUID();
   await db.insert(refundAudits).values({ id: refundAuditId, refundId, actorId: admin.id, eventType: "refund.succeeded", fromStatus: "processing", toStatus: "succeeded", metadata: JSON.stringify({ providerRefundId: `${tag}-provider-refund` }) });
   const [refundEvent] = await db.select().from(auditEvents).where(and(eq(auditEvents.sourceType, "refund_audits"), eq(auditEvents.sourceId, refundAuditId)));

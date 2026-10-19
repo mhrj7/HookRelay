@@ -3,6 +3,7 @@ import test from "node:test";
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { eq, inArray, sql } from "drizzle-orm";
+import postgres from "postgres";
 import { getDb } from "../db";
 import { cartItems, carts, categories, commerceOrderItems, commerceOrders, inventoryReservations, outboxEvents, paymentIntents, products, productVariants, refundAudits, refunds, stores, users, warehouses, warehouseStock } from "../db/schema";
 import { issueAccessToken } from "../lib/api-tokens";
@@ -59,7 +60,7 @@ test("M-26/M-27/M-29/M-30 HTTP: checkout, cancellation, and authorized refund wo
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   const address = server.address(); assert.ok(address && typeof address !== "string");
   const origin = `http://127.0.0.1:${address.port}`;
-  const db = getDb(); const tag = crypto.randomUUID(); const userIds: number[] = [];
+  const db = getDb(); const direct = postgres(process.env.DATABASE_URL!, { max: 1 }); const tag = crypto.randomUUID(); const userIds: number[] = [];
   const storeId = crypto.randomUUID(), productId = crypto.randomUUID(), warehouseId = crypto.randomUUID();
   const variantIds = [crypto.randomUUID(), crypto.randomUUID()];
   async function post(token: string, path: string, body: unknown) {
@@ -80,7 +81,7 @@ test("M-26/M-27/M-29/M-30 HTTP: checkout, cancellation, and authorized refund wo
   }
   try {
     if (process.env.ALLOW_NEON_M42_INTEGRATION !== "1") {
-      for (const file of ["0010_inventory_reservations.sql", "0011_reservation_release.sql", "0012_buyer_cart.sql", "0013_cart_checkout.sql", "0014_checkout_idempotency.sql", "0015_order_cancellation.sql", "0016_refund_workflow.sql", "0017_notifications.sql", "0019_commission_rate_snapshot.sql", "0020_commerce_payment_capture.sql", "0021_refund_provider_payment.sql"]) {
+      for (const file of ["0010_inventory_reservations.sql", "0011_reservation_release.sql", "0012_buyer_cart.sql", "0013_cart_checkout.sql", "0014_checkout_idempotency.sql", "0015_order_cancellation.sql", "0016_refund_workflow.sql", "0017_notifications.sql", "0019_commission_rate_snapshot.sql", "0020_commerce_payment_capture.sql", "0021_refund_provider_payment.sql", "0023_transactional_outbox_guards.sql"]) {
         await db.execute(sql.raw(await readFile(new URL(`../drizzle/${file}`, import.meta.url), "utf8")));
       }
     }
@@ -100,6 +101,19 @@ test("M-26/M-27/M-29/M-30 HTTP: checkout, cancellation, and authorized refund wo
     await db.insert(warehouseStock).values(variantIds.map(variantId => ({ warehouseId, variantId, quantity: 10 })));
     const [sellerToken, buyerAToken, buyerBToken, adminToken] = await Promise.all(clerkIds.map(clerkId => issueAccessToken({ clerkId })));
     void sellerToken;
+
+    const unpairedOrderId = crypto.randomUUID();
+    await assert.rejects(direct.begin(async tx => {
+      await tx`INSERT INTO commerce_orders(id, buyer_id, idempotency_key, request_fingerprint, total) VALUES (${unpairedOrderId}, ${userIds[1]}, ${`m44-${tag}-missing-event`}, ${tag}, 100)`;
+      await tx`INSERT INTO payment_intents(id, order_id, amount) VALUES (${crypto.randomUUID()}, ${unpairedOrderId}, 100)`;
+    }), /order\.created|without order/i, "an order and payment intent cannot commit without their domain outbox event");
+    assert.equal((await db.select().from(commerceOrders).where(eq(commerceOrders.id, unpairedOrderId))).length, 0, "the unmatched domain rows roll back");
+
+    const orphanOrderId = crypto.randomUUID(); const orphanEventId = crypto.randomUUID();
+    await assert.rejects(direct.begin(async tx => {
+      await tx`INSERT INTO outbox_events(id, aggregate_type, aggregate_id, event_type, payload) VALUES (${orphanEventId}, 'order', ${orphanOrderId}, 'order.created', ${JSON.stringify({ orderId: orphanOrderId })})`;
+    }), /missing order/i, "an outbox event cannot commit without its domain order");
+    assert.equal((await db.select().from(outboxEvents).where(eq(outboxEvents.id, orphanEventId))).length, 0, "the orphan event rolls back");
 
     assert.equal((await post(buyerAToken, "/api/cart", { variantId: variantIds[0], quantity: 2 })).status, 200);
     assert.equal((await post(buyerAToken, "/api/cart", { variantId: variantIds[1], quantity: 1 })).status, 200);
@@ -133,6 +147,19 @@ test("M-26/M-27/M-29/M-30 HTTP: checkout, cancellation, and authorized refund wo
     assert.equal(intent.id, checkout.data.order.paymentIntentId); assert.equal(intent.amount, 450); assert.equal(intent.status, "requires_payment_method");
     assert.equal(event.id, checkout.data.order.outboxEventId); assert.equal(event.eventType, "order.created"); assert.equal(event.status, "pending"); assert.deepEqual(JSON.parse(event.payload), { total: 450, buyerId: userIds[1], orderId: order.id, currency: "INR", itemCount: 2 });
     assert.equal((await db.select().from(cartItems).innerJoin(carts, eq(cartItems.cartId, carts.id)).where(eq(carts.buyerId, userIds[1]))).length, 0, "Successful checkout clears only the buyer's items");
+
+    await assert.rejects(direct.begin(async tx => {
+      await tx`UPDATE payment_intents SET status = 'succeeded' WHERE id = ${intent.id}`;
+      await tx`UPDATE commerce_orders SET status = 'paid' WHERE id = ${order.id}`;
+    }), /without order\.paid/i, "paid domain state cannot commit without order.paid");
+    assert.equal((await db.select().from(commerceOrders).where(eq(commerceOrders.id, order.id)))[0].status, "pending_payment", "the unmatched payment/order transition rolls back");
+    assert.equal((await db.select().from(paymentIntents).where(eq(paymentIntents.id, intent.id)))[0].status, "requires_payment_method");
+
+    const prematurePaidEventId = crypto.randomUUID();
+    await assert.rejects(direct.begin(async tx => {
+      await tx`INSERT INTO outbox_events(id, aggregate_type, aggregate_id, event_type, payload) VALUES (${prematurePaidEventId}, 'order', ${order.id}, 'order.paid', ${JSON.stringify({ orderId: order.id })})`;
+    }), /matching domain state/i, "order.paid cannot commit before the payment/order transition");
+    assert.equal((await db.select().from(outboxEvents).where(eq(outboxEvents.id, prematurePaidEventId))).length, 0, "the premature event rolls back");
 
     const changedPayload = await post(buyerAToken, "/api/checkout/orders", { key: checkoutKey, reservationIds: [reservationIds[0]] });
     assert.equal(changedPayload.status, 409); assert.match(changedPayload.data.error ?? "", /idempotency key/i);
@@ -228,16 +255,23 @@ test("M-26/M-27/M-29/M-30 HTTP: checkout, cancellation, and authorized refund wo
     assert.equal((await db.select().from(refundAudits).where(eq(refundAudits.refundId, storedRefund.id))).length, 2);
     console.log("M-26/M-27/M-29/M-30: checkout and cancellation passed; admin provider refund persisted one provider result, refunded states, two audit events, one outbox event, and idempotent replay.");
   } finally {
-    await db.delete(refundAudits).where(inArray(refundAudits.refundId, (await db.select({ id: refunds.id }).from(refunds).where(inArray(refunds.requestedBy, userIds.length ? userIds : [-1]))).map(row => row.id)));
-    await db.delete(refunds).where(inArray(refunds.requestedBy, userIds.length ? userIds : [-1]));
-    await db.delete(outboxEvents).where(eq(outboxEvents.aggregateType, "order"));
-    await db.delete(paymentIntents).where(inArray(paymentIntents.orderId, (await db.select({ id: commerceOrders.id }).from(commerceOrders).where(eq(commerceOrders.buyerId, userIds[1] ?? -1))).map(row => row.id)));
-    await db.delete(commerceOrders).where(inArray(commerceOrders.buyerId, userIds.length ? userIds : [-1]));
-    await db.delete(carts).where(inArray(carts.buyerId, userIds.length ? userIds : [-1]));
-    await db.delete(inventoryReservations).where(inArray(inventoryReservations.variantId, variantIds));
-    await db.delete(warehouseStock).where(inArray(warehouseStock.variantId, variantIds));
-    await db.delete(warehouses).where(eq(warehouses.id, warehouseId)); await db.delete(products).where(eq(products.id, productId));
-    await db.delete(stores).where(eq(stores.id, storeId)); await db.delete(categories).where(eq(categories.id, tag)); if (userIds.length) await db.delete(users).where(inArray(users.id, userIds));
+    await direct.begin(async tx => {
+      const orderRows = await tx`SELECT id FROM commerce_orders WHERE buyer_id = ${userIds[1] ?? -1}`;
+      const orderIds = orderRows.map(row => row.id as string);
+      await tx`DELETE FROM refund_audits WHERE refund_id IN (SELECT id FROM refunds WHERE requested_by = ANY(${userIds.length ? userIds : [-1]}::int[]))`;
+      await tx`DELETE FROM refunds WHERE requested_by = ANY(${userIds.length ? userIds : [-1]}::int[])`;
+      await tx`DELETE FROM outbox_events WHERE aggregate_type = 'order' AND aggregate_id = ANY(${orderIds.length ? orderIds : ["-1"]}::text[])`;
+      await tx`DELETE FROM payment_intents WHERE order_id = ANY(${orderIds.length ? orderIds : ["-1"]}::text[])`;
+      await tx`DELETE FROM commerce_orders WHERE buyer_id = ANY(${userIds.length ? userIds : [-1]}::int[])`;
+      await tx`DELETE FROM carts WHERE buyer_id = ANY(${userIds.length ? userIds : [-1]}::int[])`;
+      await tx`DELETE FROM inventory_reservations WHERE variant_id = ANY(${variantIds}::text[])`;
+      await tx`DELETE FROM warehouse_stock WHERE variant_id = ANY(${variantIds}::text[])`;
+      await tx`DELETE FROM warehouses WHERE id = ${warehouseId}`; await tx`DELETE FROM products WHERE id = ${productId}`;
+      await tx`DELETE FROM stores WHERE id = ${storeId}`; await tx`DELETE FROM categories WHERE id = ${tag}`;
+      // M-43 audit rows are immutable and keep actor foreign keys; disposable
+      // test databases/branches should be discarded instead of deleting actors.
+    });
+    await direct.end();
     const databaseClient = (db as unknown as { $client?: { end?: () => Promise<void> } }).$client;
     if (typeof databaseClient?.end === "function") await databaseClient.end();
     server.closeAllConnections(); await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
