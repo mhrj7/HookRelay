@@ -1,6 +1,7 @@
-import { and, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { getDb } from "../../../../../db";
 import { organizationMembers, organizations, users } from "../../../../../db/schema";
+import { removeOrganizationMemberRole, saveOrganizationMemberRole } from "../../../../../lib/audit-service";
 import { requireUser } from "../../../../../lib/auth";
 import { actorFor, routeError } from "../../../../../lib/marketplace";
 import { canInviteOrganizationStaff } from "../../../../../lib/authorization";
@@ -44,8 +45,8 @@ export async function POST(request: Request, { params }: Context) {
     if (!invitedUser) return Response.json({ error: "This teammate needs to sign in to VyapaarCart once before you can invite them." }, { status: 404 });
     const member = await actorFor(result.db, invitedUser.id);
     if (member.id === result.organization.ownerId) return Response.json({ error: "The organization owner is already on this team." }, { status: 400 });
-    if (member.role !== "admin") await result.db.update(users).set({ role: "seller_staff", staffForSellerId: result.organization.ownerId, sellerApprovalStatus: "approved" }).where(eq(users.id, member.id));
-    await result.db.insert(organizationMembers).values({ organizationId: id, userId: member.id, role: memberRole, createdAt: new Date().toISOString() }).onConflictDoUpdate({ target: [organizationMembers.organizationId, organizationMembers.userId], set: { role: memberRole } });
+    const saved = await saveOrganizationMemberRole({ actor: result.actor, organizationId: id, organizationOwnerId: result.organization.ownerId, memberId: member.id, membershipRole: memberRole });
+    if (!saved) return Response.json({ error: "This teammate could not be added." }, { status: 409 });
     return Response.json({ member: { id: member.id, displayName: invitedUser.fullName || invitedUser.username || normalizedEmail, role: memberRole } }, { status: 201 });
   } catch (error) { return routeError(error); }
 }
@@ -58,7 +59,8 @@ export async function DELETE(request: Request, { params }: Context) {
     const { clerkId } = await request.json() as { clerkId?: string };
     const [member] = clerkId ? await result.db.select().from(users).where(eq(users.clerkId, clerkId)).limit(1) : [];
     if (!member || member.id === result.organization.ownerId) return Response.json({ error: "Choose a non-owner member to remove." }, { status: 400 });
-    await result.db.delete(organizationMembers).where(and(eq(organizationMembers.organizationId, id), eq(organizationMembers.userId, member.id)));
+    const removed = await removeOrganizationMemberRole({ actor: result.actor, organizationId: id, organizationOwnerId: result.organization.ownerId, memberId: member.id });
+    if (!removed) return Response.json({ error: "This teammate is not a member of the organization." }, { status: 404 });
     return Response.json({ ok: true });
   } catch (error) { return routeError(error); }
 }

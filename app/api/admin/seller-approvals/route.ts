@@ -4,6 +4,7 @@ import { sellerApprovalAudits, users } from "../../../../db/schema";
 import { requireUser } from "../../../../lib/auth";
 import { actorFor, routeError } from "../../../../lib/marketplace";
 import { canApproveSellers } from "../../../../lib/authorization";
+import { decideSellerApproval } from "../../../../lib/audit-service";
 
 export const dynamic = "force-dynamic";
 
@@ -31,11 +32,8 @@ export async function PATCH(request: Request) {
     if (!result) return Response.json({ error: "Administrator access is required." }, { status: 403 });
     const { sellerId, decision } = await request.json() as { sellerId?: number; decision?: "approved" | "rejected" };
     if (!Number.isInteger(sellerId) || (decision !== "approved" && decision !== "rejected")) return Response.json({ error: "Choose a seller and an approval decision." }, { status: 400 });
-    const [seller] = await result.db.select().from(users).where(eq(users.id, sellerId!)).limit(1);
-    if (!seller || seller.sellerApprovalStatus !== "pending") return Response.json({ error: "This seller does not have a pending approval request." }, { status: 409 });
-    const now = new Date().toISOString();
-    await result.db.update(users).set({ role: decision === "approved" ? "seller" : "buyer", sellerApprovalStatus: decision, sellerApprovedAt: decision === "approved" ? now : null, sellerApprovedById: result.actor.id }).where(eq(users.id, seller.id));
-    await result.db.insert(sellerApprovalAudits).values({ id: crypto.randomUUID(), sellerId: seller.id, adminId: result.actor.id, action: decision, previousStatus: seller.sellerApprovalStatus, nextStatus: decision, createdAt: now });
-    return Response.json({ seller: { id: seller.id, status: decision } });
+    const seller = await decideSellerApproval({ actor: result.actor, sellerId: sellerId!, decision });
+    if (!seller) return Response.json({ error: "This seller does not have a pending approval request." }, { status: 409 });
+    return Response.json({ seller: { id: seller.sellerId, status: seller.status } });
   } catch (error) { return routeError(error); }
 }

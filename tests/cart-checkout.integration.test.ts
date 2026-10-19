@@ -3,7 +3,6 @@ import test from "node:test";
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { eq, inArray, sql } from "drizzle-orm";
-import { drizzle as drizzlePostgres } from "drizzle-orm/postgres-js";
 import { getDb } from "../db";
 import { cartItems, carts, categories, commerceOrderItems, commerceOrders, inventoryReservations, outboxEvents, paymentIntents, products, productVariants, refundAudits, refunds, stores, users, warehouses, warehouseStock } from "../db/schema";
 import { issueAccessToken } from "../lib/api-tokens";

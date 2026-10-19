@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { boolean, check, foreignKey, index, integer, pgTable, primaryKey, serial, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
+import { boolean, check, foreignKey, index, integer, jsonb, pgTable, primaryKey, serial, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
 
 const now = sql`CURRENT_TIMESTAMP::text`;
 
@@ -297,6 +297,27 @@ export const refundAudits = pgTable("refund_audits", {
   metadata: text("metadata").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`clock_timestamp()`),
 }, t => [index("idx_refund_audits_refund_created").on(t.refundId, t.createdAt)]);
+
+export const auditEvents = pgTable("audit_events", {
+  id: text("id").primaryKey(),
+  actorId: integer("actor_id").notNull().references(() => users.id, { onDelete: "restrict" }),
+  actorRole: text("actor_role").notNull(),
+  action: text("action").notNull(),
+  targetType: text("target_type").notNull(),
+  targetId: text("target_id").notNull(),
+  beforeSummary: jsonb("before_summary").notNull().$type<Record<string, unknown>>(),
+  afterSummary: jsonb("after_summary").notNull().$type<Record<string, unknown>>(),
+  metadata: jsonb("metadata").notNull().default({}).$type<Record<string, unknown>>(),
+  sourceType: text("source_type").notNull(),
+  sourceId: text("source_id").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`clock_timestamp()`),
+}, t => [
+  uniqueIndex("idx_audit_events_source").on(t.sourceType, t.sourceId),
+  index("idx_audit_events_created").on(t.createdAt, t.id),
+  index("idx_audit_events_actor_created").on(t.actorId, t.createdAt),
+  index("idx_audit_events_target_created").on(t.targetType, t.targetId, t.createdAt),
+  index("idx_audit_events_action_created").on(t.action, t.createdAt),
+]);
 
 export const productVariantAttributes = pgTable("product_variant_attributes", {
   variantId: text("variant_id").notNull().references(() => productVariants.id, { onDelete: "cascade" }),

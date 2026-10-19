@@ -529,11 +529,32 @@ flowchart LR
 - The admin report uses the stored rate on each item and returns a conflict for an inconsistent settled order instead of silently omitting it.
 - Verified against a disposable Neon branch and local PostgreSQL through checkout → payment capture → stock commit → commission report → provider-linked refund → commission reversal. The same production migration was then applied and schema-verified on the production Neon branch.
 
+### M‑43: Immutable audit logs
+
+**Status: Complete — verified locally, on an isolated Neon branch, and against the production schema.**
+
+Sensitive marketplace changes are written to one append-only `audit_events` stream. Each event identifies the actor and role, action, target, exact before/after summary, metadata, source record, and database timestamp.
+
+```mermaid
+flowchart LR
+  S[Seller approval] --> A[Immutable audit event]
+  I[Inventory edit] --> A
+  R[Refund transition] --> A
+  M[Staff role change] --> A
+  A --> V[Admin-only audit viewer]
+```
+
+- Seller approvals and organization membership/role changes update domain state and create the audit record in the same PostgreSQL statement, preventing an unaudited partial success.
+- Database triggers mirror existing inventory and refund audit rows into the central stream in the same transaction as their source write. Existing legacy records are backfilled idempotently.
+- A database trigger rejects updates and deletes on `audit_events`; source IDs have a unique constraint so retries cannot duplicate an event.
+- `GET /api/admin/audit-logs` and `/admin/audit-logs` require an administrator and expose the actor, target, before/after state, metadata, and timestamp for investigation.
+- Verification covers all four required change categories, add/change/remove role transitions, duplicate-safe source identity, admin retrieval, and rejected tampering on disposable PostgreSQL and an isolated Neon branch. The migration is also schema-verified on production Neon.
+
 ## Resume-safe project description
 
 Use this now:
 
-> Built and deployed VyapaarCart, a full-stack local marketplace using Next.js, TypeScript, Neon Postgres, Drizzle, Clerk, S3-compatible storage, and Razorpay test mode. Implemented authenticated seller stores, SKU inventory and expiring reservations, idempotent multi-item checkout, verified test payments and refunds, immutable per-item commission snapshots with refund reversals, buyer–seller messaging, and persisted simulated shipment tracking.
+> Built and deployed VyapaarCart, a full-stack local marketplace using Next.js, TypeScript, Neon Postgres, Drizzle, Clerk, S3-compatible storage, and Razorpay test mode. Implemented authenticated seller stores, SKU inventory and expiring reservations, idempotent multi-item checkout, verified test payments and refunds, immutable per-item commission snapshots with refund reversals, append-only audit logs for sensitive changes, buyer–seller messaging, and persisted simulated shipment tracking.
 
 Do **not** claim live-money settlement, Kafka, Redis, FastAPI, real courier booking, webhooks, or measured scale. The checkout, payment, refund, and commission lifecycle is verified in provider test mode. Add new claims only after they are genuinely implemented and tested.
 
