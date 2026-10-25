@@ -20,7 +20,7 @@
     "@neondatabase/serverless": "^1.0.2",
     "drizzle-orm": "0.45.2",
     "jose": "^6.2.12",
-    "next": "^16.2.6",
+    "next": "16.4.3",
     "postgres": "^3.4.9",
     "react": "19.2.6",
     "react-dom": "19.2.6"
